@@ -11,6 +11,7 @@ pymupdf>=1.24.0             # Image extraction from PDFs (import as 'fitz')
 
 # Anthropic API (for agentic LLM calls)
 anthropic>=0.40.0           # Claude API client
+python-dotenv>=1.0.0        # Load environment variables from .env file
 
 # Anki Deck Generation
 genanki>=0.13.0             # Create .apkg Anki deck files
