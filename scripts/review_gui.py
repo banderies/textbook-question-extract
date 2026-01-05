@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import fitz  # PyMuPDF
 
 # Page config
@@ -34,8 +35,7 @@ st.set_page_config(
 
 # Paths
 SOURCE_DIR = "source"
-OUTPUT_DIR = "output"
-IMAGES_DIR = "output/images"
+BASE_OUTPUT_DIR = "output"
 
 # Fallback Claude models (used if API fetch fails)
 # Maps model_id -> display_name
@@ -51,14 +51,77 @@ DEFAULT_MODEL_NAME = "Claude Sonnet 4"  # Display name for default
 # Cache for fetched models
 _cached_models = None
 
-# Files
-CHAPTERS_FILE = f"{OUTPUT_DIR}/chapters.json"
-CHAPTER_TEXT_FILE = f"{OUTPUT_DIR}/chapter_text.json"
-QUESTIONS_FILE = f"{OUTPUT_DIR}/questions_by_chapter.json"
-IMAGES_FILE = f"{OUTPUT_DIR}/images.json"
-IMAGE_ASSIGNMENTS_FILE = f"{OUTPUT_DIR}/image_assignments.json"
-QC_PROGRESS_FILE = f"{OUTPUT_DIR}/qc_progress.json"
-SETTINGS_FILE = f"{OUTPUT_DIR}/settings.json"
+
+# =============================================================================
+# Dynamic Path Functions (per-PDF output directories)
+# =============================================================================
+
+def get_pdf_slug(pdf_name: str) -> str:
+    """Convert PDF filename to a safe directory slug."""
+    # Remove .pdf extension and convert to safe directory name
+    slug = Path(pdf_name).stem
+    # Replace spaces and special chars with underscores
+    slug = re.sub(r'[^\w\-]', '_', slug)
+    # Remove multiple consecutive underscores
+    slug = re.sub(r'_+', '_', slug)
+    return slug.strip('_')
+
+
+def get_output_dir() -> str:
+    """Get output directory for current PDF."""
+    if "current_pdf" in st.session_state and st.session_state.current_pdf:
+        slug = get_pdf_slug(st.session_state.current_pdf)
+        return f"{BASE_OUTPUT_DIR}/{slug}"
+    return BASE_OUTPUT_DIR
+
+
+def get_images_dir() -> str:
+    """Get images directory for current PDF."""
+    return f"{get_output_dir()}/images"
+
+
+def get_chapters_file() -> str:
+    return f"{get_output_dir()}/chapters.json"
+
+
+def get_chapter_text_file() -> str:
+    return f"{get_output_dir()}/chapter_text.json"
+
+
+def get_questions_file() -> str:
+    return f"{get_output_dir()}/questions_by_chapter.json"
+
+
+def get_images_file() -> str:
+    return f"{get_output_dir()}/images.json"
+
+
+def get_image_assignments_file() -> str:
+    return f"{get_output_dir()}/image_assignments.json"
+
+
+def get_qc_progress_file() -> str:
+    return f"{get_output_dir()}/qc_progress.json"
+
+
+def get_settings_file() -> str:
+    return f"{get_output_dir()}/settings.json"
+
+
+def get_pages_file() -> str:
+    return f"{get_output_dir()}/pages.json"
+
+
+def get_available_textbooks() -> list[str]:
+    """Get list of textbooks that have output data."""
+    textbooks = []
+    if os.path.exists(BASE_OUTPUT_DIR):
+        for item in os.listdir(BASE_OUTPUT_DIR):
+            item_path = os.path.join(BASE_OUTPUT_DIR, item)
+            # Check if it's a directory with a chapters.json file
+            if os.path.isdir(item_path) and os.path.exists(os.path.join(item_path, "chapters.json")):
+                textbooks.append(item)
+    return sorted(textbooks)
 
 
 # =============================================================================
@@ -77,7 +140,7 @@ def extract_text_from_pdf(pdf_path: str) -> list[dict]:
     return pages
 
 
-def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list[dict]:
+def extract_images_from_pdf(pdf_path: str, output_dir: str = None) -> list[dict]:
     """
     Extract images from PDF with page numbers, positions, and flanking text context.
     Returns list of image metadata including text before/after each image.
@@ -85,6 +148,8 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list
     Flanking text is extracted across page boundaries - if an image is at the top
     of a page, context_before will include text from the bottom of the previous page.
     """
+    if output_dir is None:
+        output_dir = get_images_dir()
     os.makedirs(output_dir, exist_ok=True)
     doc = fitz.open(pdf_path)
 
@@ -501,10 +566,20 @@ def extract_chapter_text(pages: list[dict], start_page: int, end_page: Optional[
     return "\n\n".join(chapter_pages)
 
 
-def extract_qa_pairs_llm(client, chapter_num: int, chapter_text: str) -> dict:
-    """Use Claude to extract Q&A pairs from a single chapter."""
+def extract_qa_pairs_llm(client, chapter_num: int, chapter_text: str, model_id: str = None) -> dict:
+    """Use Claude to extract Q&A pairs from a single chapter.
+
+    Args:
+        client: Anthropic client
+        chapter_num: Chapter number
+        chapter_text: Full text of the chapter
+        model_id: Optional model ID override (for parallel execution)
+    """
+    # Use provided model_id or get from session state
+    model = model_id or get_selected_model_id()
+
     response = client.messages.create(
-        model=get_selected_model_id(),
+        model=model,
         max_tokens=16000,
         messages=[{
             "role": "user",
@@ -516,12 +591,23 @@ TASK:
 3. Match each question to its answer
 4. Identify the correct answer choice (A, B, C, D, or E)
 
-IMPORTANT:
+IMPORTANT - MULTI-PART QUESTIONS:
+Some questions follow a multi-part format:
+- A "context question" (e.g., "1") contains a clinical scenario/case and possibly an image, but NO answer choices
+- Sub-questions (e.g., "1a", "1b", "1c") contain the actual questions WITH answer choices
+
+You MUST extract BOTH:
+1. The context question (e.g., "1") - extract it with empty choices {{}}, empty correct_answer "", and empty explanation ""
+2. All sub-questions (e.g., "1a", "1b", "1c") - extract normally with their choices, answers, and explanations
+
+Do NOT skip context questions just because they have no answer choices. Extract them as-is.
+
+ADDITIONAL RULES:
 - Questions may have sub-parts like 2a, 2b, 2c - treat each as a separate question
-- Question IDs should match exactly as they appear in the ANSWERS section (e.g., "1", "2a", "2b", "3")
-- For images: If a question or ANY of its sub-parts reference an image (e.g., "image below", "figure", "radiograph shown"), mark ALL related sub-questions with has_image: true. For example, if questions 2a, 2b, 2c all refer to the same image shown before 2a, then 2a, 2b, AND 2c should ALL have has_image: true
-- Use image_group to indicate which questions share the same image (e.g., "2" for 2a, 2b, 2c sharing one image)
-- Extract the full question text and all answer choices
+- Question IDs should match exactly as they appear (e.g., "1", "1a", "1b", "2a", "2b", "3")
+- For images: If a question references an image (e.g., "image below", "figure", "radiograph shown"), mark has_image: true
+- Use image_group to indicate which questions share the same image (e.g., "1" for questions 1, 1a, 1b, 1c sharing one image)
+- Extract the full question text and all answer choices (if present)
 
 Return ONLY a JSON object in this exact format:
 {{
@@ -529,14 +615,23 @@ Return ONLY a JSON object in this exact format:
   "questions": [
     {{
       "id": "1",
-      "text": "Full question text here",
+      "text": "Clinical scenario/context text here (no answer choices)",
+      "choices": {{}},
+      "has_image": true,
+      "image_group": "1",
+      "correct_answer": "",
+      "explanation": ""
+    }},
+    {{
+      "id": "1a",
+      "text": "First sub-question text",
       "choices": {{
         "A": "Choice A text",
         "B": "Choice B text",
         "C": "Choice C text",
         "D": "Choice D text"
       }},
-      "has_image": true,
+      "has_image": false,
       "image_group": "1",
       "correct_answer": "B",
       "explanation": "Brief explanation from the answer section"
@@ -561,6 +656,275 @@ CHAPTER TEXT:
         return {"chapter": chapter_num, "questions": [], "error": str(e)}
 
 
+def process_chapter_extraction(client, ch_num: int, ch_key: str, ch_text: str, model_id: str) -> tuple[str, list[dict]]:
+    """
+    Process a single chapter extraction (for parallel execution).
+
+    Returns:
+        Tuple of (ch_key, list of formatted questions)
+    """
+    result = extract_qa_pairs_llm(client, ch_num, ch_text, model_id)
+
+    questions = []
+    for q in result.get("questions", []):
+        questions.append({
+            "full_id": f"ch{ch_num}_{q['id']}",
+            "local_id": q["id"],
+            "text": q.get("text", ""),
+            "choices": q.get("choices", {}),
+            "has_image": q.get("has_image", False),
+            "image_group": q.get("image_group"),
+            "correct_answer": q.get("correct_answer", ""),
+            "explanation": q.get("explanation", "")
+        })
+
+    return (ch_key, questions)
+
+
+def postprocess_questions_llm(client, questions: dict, model_id: str = None) -> dict:
+    """
+    Post-process extracted questions to link context to sub-questions.
+
+    This function:
+    1. Identifies "context-only" questions (no choices, just setup text)
+    2. Tags them with is_context_only: true so they're excluded from Anki
+    3. Links context text to sub-questions that share the same image_group
+    4. Adds inherited context as a "context" field in sub-questions
+
+    Args:
+        client: Anthropic client
+        questions: Dict mapping ch_key -> list of question dicts
+        model_id: Optional model ID override
+
+    Returns:
+        Updated questions dict with context linking applied
+    """
+    model = model_id or get_selected_model_id()
+
+    # Process each chapter
+    for ch_key, ch_questions in questions.items():
+        if not ch_questions:
+            continue
+
+        # Build JSON representation for the LLM
+        questions_json = json.dumps(ch_questions, indent=2)
+
+        prompt = f"""Analyze this list of extracted questions and identify context relationships.
+
+TASK:
+1. Identify "context-only" entries - these have descriptive text but NO answer choices (empty choices dict)
+2. For each context-only entry, find its related sub-questions by matching the image_group
+3. Return the updated questions with context properly linked
+
+RULES:
+- A question is "context-only" if it has no choices (choices is empty {{}}) AND its ID is just a number (e.g., "5") not a letter suffix (e.g., "5a")
+- Sub-questions share the same image_group as their context question
+- Example: If question "5" has image_group="5" and no choices, and questions "5a", "5b", "5c" also have image_group="5", then 5a/5b/5c are sub-questions of context "5"
+
+FOR EACH QUESTION, add these fields:
+- "is_context_only": true/false - true if this is just context (no choices, no correct answer)
+- "context": "" - for sub-questions, copy the context question's text here. Leave empty for standalone questions.
+- "context_question_id": "" - for sub-questions, the local_id of their context question (e.g., "5"). Leave empty otherwise.
+
+QUESTIONS TO PROCESS:
+{questions_json}
+
+Return ONLY the updated JSON array with all original fields preserved plus the new fields added."""
+
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=16000,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            response_text = response.content[0].text
+
+            # Extract JSON from response
+            if "```" in response_text:
+                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+                if match:
+                    response_text = match.group(1)
+
+            updated_questions = json.loads(response_text)
+            questions[ch_key] = updated_questions
+
+        except Exception as e:
+            # If post-processing fails, add default fields to existing questions
+            print(f"Post-processing failed for {ch_key}: {e}")
+            for q in ch_questions:
+                if "is_context_only" not in q:
+                    # Heuristic: no choices and no letter suffix = context only
+                    has_choices = bool(q.get("choices"))
+                    has_letter = any(c.isalpha() for c in q.get("local_id", ""))
+                    q["is_context_only"] = not has_choices and not has_letter
+                if "context" not in q:
+                    q["context"] = ""
+                if "context_question_id" not in q:
+                    q["context_question_id"] = ""
+
+    return questions
+
+
+def associate_context_llm(client, questions: dict, image_assignments: dict, model_id: str = None) -> tuple[dict, dict, dict]:
+    """
+    Use LLM to identify context relationships and merge context into sub-questions.
+
+    This function:
+    1. Sends questions to LLM to identify context-only questions and their sub-questions
+    2. Prepends context text to sub-questions
+    3. Copies image assignments from context questions to sub-questions
+    4. Marks context-only questions for exclusion from Anki export
+
+    Args:
+        client: Anthropic client
+        questions: Dict mapping ch_key -> list of question dicts
+        image_assignments: Dict mapping image filename -> question full_id
+        model_id: Optional model ID override
+
+    Returns:
+        Tuple of (updated_questions, updated_image_assignments, stats)
+    """
+    model = model_id or get_selected_model_id()
+
+    if image_assignments is None:
+        image_assignments = {}
+
+    updated_assignments = dict(image_assignments)
+
+    stats = {
+        "context_questions_found": 0,
+        "sub_questions_updated": 0,
+        "images_copied": 0
+    }
+
+    # Process each chapter
+    for ch_key, ch_questions in questions.items():
+        if not ch_questions:
+            continue
+
+        # Build a summary of questions for the LLM
+        questions_summary = []
+        for q in ch_questions:
+            has_choices = bool(q.get("choices"))
+            summary = {
+                "full_id": q["full_id"],
+                "local_id": q["local_id"],
+                "text_preview": q["text"][:200] + "..." if len(q["text"]) > 200 else q["text"],
+                "has_choices": has_choices
+            }
+            questions_summary.append(summary)
+
+        prompt = f"""Analyze these questions from a medical textbook and identify CONTEXT relationships.
+
+CONTEXT PATTERN:
+Some questions follow this pattern:
+- A "context question" (e.g., ID "1") contains a clinical scenario but NO answer choices
+- Sub-questions (e.g., "1a", "1b", "1c") contain the actual questions WITH answer choices
+- The sub-questions all relate to the context question
+
+YOUR TASK:
+1. Identify which questions are "context-only" (have text but NO answer choices)
+2. For each context question, identify which sub-questions belong to it
+3. Sub-questions typically share the same base number (1a, 1b, 1c all belong to context 1)
+
+QUESTIONS:
+{json.dumps(questions_summary, indent=2)}
+
+Return a JSON object with this structure:
+{{
+  "context_mappings": [
+    {{
+      "context_id": "ch1_1",
+      "sub_question_ids": ["ch1_1a", "ch1_1b", "ch1_1c"]
+    }}
+  ]
+}}
+
+If there are no context relationships, return: {{"context_mappings": []}}
+
+Return ONLY the JSON, no other text."""
+
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            response_text = response.content[0].text
+
+            # Extract JSON from response
+            if "```" in response_text:
+                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+                if match:
+                    response_text = match.group(1)
+
+            result = json.loads(response_text)
+            mappings = result.get("context_mappings", [])
+
+            # Build lookup tables
+            question_by_id = {q["full_id"]: q for q in ch_questions}
+
+            # Apply the mappings
+            for mapping in mappings:
+                context_id = mapping.get("context_id")
+                sub_ids = mapping.get("sub_question_ids", [])
+
+                if not context_id or context_id not in question_by_id:
+                    continue
+
+                context_q = question_by_id[context_id]
+                context_text = context_q.get("text", "").strip()
+
+                # Mark context question
+                context_q["is_context_only"] = True
+                stats["context_questions_found"] += 1
+
+                # Find images assigned to the context question
+                context_images = [
+                    img_file for img_file, assigned_to in image_assignments.items()
+                    if assigned_to == context_id
+                ]
+
+                # Update each sub-question
+                for sub_id in sub_ids:
+                    if sub_id not in question_by_id:
+                        continue
+
+                    sub_q = question_by_id[sub_id]
+
+                    # Skip if already merged
+                    if sub_q.get("context_merged"):
+                        continue
+
+                    # Prepend context text
+                    original_text = sub_q.get("text", "").strip()
+                    sub_q["text"] = f"{context_text} {original_text}"
+                    sub_q["context_merged"] = True
+                    sub_q["context_from"] = context_id
+                    sub_q["is_context_only"] = False
+                    stats["sub_questions_updated"] += 1
+
+                    # Copy image assignments
+                    for img_file in context_images:
+                        updated_assignments[img_file] = sub_id
+                        stats["images_copied"] += 1
+
+        except Exception as e:
+            print(f"LLM context association failed for {ch_key}: {e}")
+            # Continue to next chapter on error
+            continue
+
+    # Ensure all questions have is_context_only set
+    for ch_key, ch_questions in questions.items():
+        for q in ch_questions:
+            if "is_context_only" not in q:
+                q["is_context_only"] = False
+
+    return questions, updated_assignments, stats
+
+
 # =============================================================================
 # State Management
 # =============================================================================
@@ -570,6 +934,8 @@ def init_session_state():
     # Track if this is a fresh initialization
     is_fresh_init = "initialized" not in st.session_state
 
+    if "current_pdf" not in st.session_state:
+        st.session_state.current_pdf = None
     if "pages" not in st.session_state:
         st.session_state.pages = None
     if "chapters" not in st.session_state:
@@ -583,7 +949,7 @@ def init_session_state():
     if "image_assignments" not in st.session_state:
         st.session_state.image_assignments = {}
     if "qc_progress" not in st.session_state:
-        st.session_state.qc_progress = load_qc_progress()
+        st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
     if "current_step" not in st.session_state:
         st.session_state.current_step = "source"
     if "selected_model" not in st.session_state:
@@ -591,17 +957,16 @@ def init_session_state():
     if "qc_selected_idx" not in st.session_state:
         st.session_state.qc_selected_idx = 0
 
-    # Auto-load saved data on first initialization
+    # Auto-load saved data on first initialization is deferred until PDF is selected
     if is_fresh_init:
         st.session_state.initialized = True
-        load_saved_data()
-        load_settings()
 
 
 def load_qc_progress() -> dict:
     """Load QC progress from file."""
-    if os.path.exists(QC_PROGRESS_FILE):
-        with open(QC_PROGRESS_FILE) as f:
+    qc_file = get_qc_progress_file()
+    if os.path.exists(qc_file):
+        with open(qc_file) as f:
             return json.load(f)
     return {"reviewed": {}, "corrections": {}, "metadata": {}}
 
@@ -609,58 +974,68 @@ def load_qc_progress() -> dict:
 def save_qc_progress():
     """Save QC progress to file."""
     st.session_state.qc_progress["metadata"]["last_saved"] = datetime.now().isoformat()
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    with open(QC_PROGRESS_FILE, "w") as f:
+    os.makedirs(get_output_dir(), exist_ok=True)
+    with open(get_qc_progress_file(), "w") as f:
         json.dump(st.session_state.qc_progress, f, indent=2)
 
 
 def save_chapters():
     """Save chapters to file."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    with open(CHAPTERS_FILE, "w") as f:
+    os.makedirs(get_output_dir(), exist_ok=True)
+    with open(get_chapters_file(), "w") as f:
         json.dump(st.session_state.chapters, f, indent=2)
-    with open(CHAPTER_TEXT_FILE, "w") as f:
+    with open(get_chapter_text_file(), "w") as f:
         json.dump(st.session_state.chapter_texts, f, indent=2)
 
 
 def save_questions():
     """Save questions to file."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    with open(QUESTIONS_FILE, "w") as f:
+    os.makedirs(get_output_dir(), exist_ok=True)
+    with open(get_questions_file(), "w") as f:
         json.dump(st.session_state.questions, f, indent=2)
 
 
 def save_images():
     """Save image metadata to file."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    with open(IMAGES_FILE, "w") as f:
+    os.makedirs(get_output_dir(), exist_ok=True)
+    with open(get_images_file(), "w") as f:
         json.dump(st.session_state.images, f, indent=2)
+
+
+def save_pages():
+    """Save raw PDF pages to file."""
+    if st.session_state.pages:
+        os.makedirs(get_output_dir(), exist_ok=True)
+        with open(get_pages_file(), "w") as f:
+            json.dump(st.session_state.pages, f, indent=2)
 
 
 def save_image_assignments():
     """Save image-to-question assignments to file."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    with open(IMAGE_ASSIGNMENTS_FILE, "w") as f:
+    os.makedirs(get_output_dir(), exist_ok=True)
+    with open(get_image_assignments_file(), "w") as f:
         json.dump(st.session_state.image_assignments, f, indent=2)
 
 
 def save_settings():
     """Save user settings to file."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(get_output_dir(), exist_ok=True)
     settings = {
         "selected_model": st.session_state.selected_model,
         "current_step": st.session_state.current_step,
         "qc_selected_idx": st.session_state.qc_selected_idx,
+        "current_pdf": st.session_state.get("current_pdf", ""),
         "last_saved": datetime.now().isoformat()
     }
-    with open(SETTINGS_FILE, "w") as f:
+    with open(get_settings_file(), "w") as f:
         json.dump(settings, f, indent=2)
 
 
 def load_settings():
     """Load user settings from file."""
-    if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE) as f:
+    settings_file = get_settings_file()
+    if os.path.exists(settings_file):
+        with open(settings_file) as f:
             settings = json.load(f)
             if "selected_model" in settings:
                 st.session_state.selected_model = settings["selected_model"]
@@ -672,20 +1047,30 @@ def load_settings():
 
 def load_saved_data():
     """Load previously saved data if available."""
-    if os.path.exists(CHAPTERS_FILE):
-        with open(CHAPTERS_FILE) as f:
+    pages_file = get_pages_file()
+    chapters_file = get_chapters_file()
+    chapter_text_file = get_chapter_text_file()
+    questions_file = get_questions_file()
+    images_file = get_images_file()
+    assignments_file = get_image_assignments_file()
+
+    if os.path.exists(pages_file):
+        with open(pages_file) as f:
+            st.session_state.pages = json.load(f)
+    if os.path.exists(chapters_file):
+        with open(chapters_file) as f:
             st.session_state.chapters = json.load(f)
-    if os.path.exists(CHAPTER_TEXT_FILE):
-        with open(CHAPTER_TEXT_FILE) as f:
+    if os.path.exists(chapter_text_file):
+        with open(chapter_text_file) as f:
             st.session_state.chapter_texts = json.load(f)
-    if os.path.exists(QUESTIONS_FILE):
-        with open(QUESTIONS_FILE) as f:
+    if os.path.exists(questions_file):
+        with open(questions_file) as f:
             st.session_state.questions = json.load(f)
-    if os.path.exists(IMAGES_FILE):
-        with open(IMAGES_FILE) as f:
+    if os.path.exists(images_file):
+        with open(images_file) as f:
             st.session_state.images = json.load(f)
-    if os.path.exists(IMAGE_ASSIGNMENTS_FILE):
-        with open(IMAGE_ASSIGNMENTS_FILE) as f:
+    if os.path.exists(assignments_file):
+        with open(assignments_file) as f:
             st.session_state.image_assignments = json.load(f)
 
     # Assign chapters to images if chapters exist but images don't have chapter info
@@ -707,6 +1092,12 @@ def load_saved_data():
 def render_sidebar():
     """Render sidebar with navigation."""
     st.sidebar.title("📚 Textbook Q&A Extractor")
+
+    # Show current textbook
+    if st.session_state.current_pdf:
+        textbook_name = get_pdf_slug(st.session_state.current_pdf).replace('_', ' ')
+        st.sidebar.caption(f"Working on: **{textbook_name}**")
+
     st.sidebar.markdown("---")
 
     steps = [
@@ -769,6 +1160,18 @@ def get_selected_model_id() -> str:
     return get_model_id(st.session_state.selected_model)
 
 
+def clear_session_data():
+    """Clear all session data for switching to a new PDF."""
+    st.session_state.pages = None
+    st.session_state.chapters = None
+    st.session_state.chapter_texts = {}
+    st.session_state.questions = {}
+    st.session_state.images = []
+    st.session_state.image_assignments = {}
+    st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
+    st.session_state.qc_selected_idx = 0
+
+
 def render_source_step():
     """Render source PDF selection step."""
     st.header("Step 1: Select Source PDF")
@@ -781,19 +1184,69 @@ def render_source_step():
         return
 
     pdf_options = [f.name for f in pdf_files]
+
+    # Check for existing textbooks with saved data
+    available_textbooks = get_available_textbooks()
+
+    # Show existing textbooks section if any exist
+    if available_textbooks:
+        st.subheader("Load Existing Textbook")
+        st.caption("These textbooks have saved progress:")
+
+        textbook_col1, textbook_col2 = st.columns([3, 1])
+        with textbook_col1:
+            selected_textbook = st.selectbox(
+                "Select saved textbook:",
+                available_textbooks,
+                format_func=lambda x: x.replace('_', ' '),
+                key="textbook_selector"
+            )
+        with textbook_col2:
+            if st.button("Load Textbook", type="primary"):
+                # Find corresponding PDF
+                for pdf_name in pdf_options:
+                    if get_pdf_slug(pdf_name) == selected_textbook:
+                        st.session_state.current_pdf = pdf_name
+                        break
+                else:
+                    # No matching PDF found, use slug as placeholder
+                    st.session_state.current_pdf = selected_textbook + ".pdf"
+
+                clear_session_data()
+                load_saved_data()
+                load_settings()
+                st.session_state.qc_progress = load_qc_progress()
+                st.success(f"Loaded: {selected_textbook}")
+                st.rerun()
+
+        st.markdown("---")
+        st.subheader("Start New Textbook")
+
+    # PDF selection
     selected_pdf = st.selectbox("Select PDF file:", pdf_options)
 
     if selected_pdf:
         pdf_path = f"{SOURCE_DIR}/{selected_pdf}"
+        output_slug = get_pdf_slug(selected_pdf)
         st.info(f"Selected: {pdf_path}")
+        st.caption(f"Output folder: output/{output_slug}/")
+
+        # Check if this PDF has existing data
+        has_existing_data = output_slug in available_textbooks
 
         col1, col2 = st.columns(2)
 
         with col1:
-            if st.button("Load PDF", type="primary"):
+            btn_label = "Load PDF (Fresh Start)" if has_existing_data else "Load PDF"
+            if st.button(btn_label, type="primary"):
+                # Set current PDF first so paths are correct
+                st.session_state.current_pdf = selected_pdf
+                clear_session_data()
+
                 with st.spinner("Extracting text from PDF..."):
                     st.session_state.pages = extract_text_from_pdf(pdf_path)
                     st.session_state.pdf_path = pdf_path
+                    save_pages()
 
                 with st.spinner("Extracting images from PDF..."):
                     st.session_state.images = extract_images_from_pdf(pdf_path)
@@ -803,10 +1256,15 @@ def render_source_step():
                 st.rerun()
 
         with col2:
-            if st.button("Load Previous Session"):
-                load_saved_data()
-                st.success("Loaded previous session data")
-                st.rerun()
+            if has_existing_data:
+                if st.button("Load Existing Progress"):
+                    st.session_state.current_pdf = selected_pdf
+                    clear_session_data()
+                    load_saved_data()
+                    load_settings()
+                    st.session_state.qc_progress = load_qc_progress()
+                    st.success("Loaded previous session data")
+                    st.rerun()
 
         if st.session_state.pages:
             st.success(f"PDF loaded: {len(st.session_state.pages)} pages, {len(st.session_state.images)} images")
@@ -817,7 +1275,11 @@ def render_chapters_step():
     """Render chapter extraction step."""
     st.header("Step 2: Extract Chapters")
 
-    if not st.session_state.pages:
+    # Check if we have pages or existing chapters
+    has_pages = st.session_state.pages is not None
+    has_chapters = st.session_state.chapters is not None
+
+    if not has_pages and not has_chapters:
         st.warning("Please load a PDF first (Step 1)")
         return
 
@@ -826,43 +1288,48 @@ def render_chapters_step():
         st.error("ANTHROPIC_API_KEY not set. Please configure your .env file.")
         return
 
-    col1, col2, col3 = st.columns([2, 2, 1])
+    # Only show extraction controls if we have pages to extract from
+    if has_pages:
+        col1, col2, col3 = st.columns([2, 2, 1])
 
-    with col1:
-        # Inline model selector for this step
-        model_options = get_model_options()
-        current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
-        selected_model = st.selectbox("Model:", model_options, index=current_idx, key="chapters_model")
-        if selected_model != st.session_state.selected_model:
-            st.session_state.selected_model = selected_model
-            save_settings()
+        with col1:
+            # Inline model selector for this step
+            model_options = get_model_options()
+            current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
+            selected_model = st.selectbox("Model:", model_options, index=current_idx, key="chapters_model")
+            if selected_model != st.session_state.selected_model:
+                st.session_state.selected_model = selected_model
+                save_settings()
 
-    with col2:
-        if st.button("Extract Chapters", type="primary"):
-            with st.spinner(f"Using {st.session_state.selected_model} to identify chapters..."):
-                chapters = identify_chapters_llm(client, st.session_state.pages)
-                st.session_state.chapters = chapters
+        with col2:
+            btn_label = "Re-extract Chapters" if has_chapters else "Extract Chapters"
+            if st.button(btn_label, type="primary"):
+                with st.spinner(f"Using {st.session_state.selected_model} to identify chapters..."):
+                    chapters = identify_chapters_llm(client, st.session_state.pages)
+                    st.session_state.chapters = chapters
 
-                # Extract text for each chapter
-                for i, ch in enumerate(chapters):
-                    start_page = ch["start_page"]
-                    end_page = chapters[i + 1]["start_page"] if i + 1 < len(chapters) else None
-                    ch_key = f"ch{ch['chapter_number']}"
-                    st.session_state.chapter_texts[ch_key] = extract_chapter_text(
-                        st.session_state.pages, start_page, end_page
-                    )
+                    # Extract text for each chapter
+                    for i, ch in enumerate(chapters):
+                        start_page = ch["start_page"]
+                        end_page = chapters[i + 1]["start_page"] if i + 1 < len(chapters) else None
+                        ch_key = f"ch{ch['chapter_number']}"
+                        st.session_state.chapter_texts[ch_key] = extract_chapter_text(
+                            st.session_state.pages, start_page, end_page
+                        )
 
-                save_chapters()
+                    save_chapters()
 
-                # Assign chapter numbers to images
-                if st.session_state.images:
-                    st.session_state.images = assign_chapters_to_images(
-                        st.session_state.images, chapters
-                    )
-                    save_images()
+                    # Assign chapter numbers to images
+                    if st.session_state.images:
+                        st.session_state.images = assign_chapters_to_images(
+                            st.session_state.images, chapters
+                        )
+                        save_images()
 
-            st.success(f"Found {len(chapters)} chapters")
-            st.rerun()
+                st.success(f"Found {len(chapters)} chapters")
+                st.rerun()
+    elif has_chapters:
+        st.info("Chapters already extracted. Go to Step 1 to reload PDF if you need to re-extract.")
 
     if st.session_state.chapters:
         st.subheader("Extracted Chapters")
@@ -969,29 +1436,45 @@ def render_questions_step():
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
-                for i, ch in enumerate(st.session_state.chapters):
+                # Capture model ID before parallel execution (session state not thread-safe)
+                model_id = get_selected_model_id()
+                total_chapters = len(st.session_state.chapters)
+
+                # Prepare chapter data for parallel processing
+                chapter_tasks = []
+                for ch in st.session_state.chapters:
                     ch_num = ch["chapter_number"]
                     ch_key = f"ch{ch_num}"
-                    status_text.text(f"Processing Chapter {ch_num}...")
-
                     ch_text = st.session_state.chapter_texts.get(ch_key, "")
-                    result = extract_qa_pairs_llm(client, ch_num, ch_text)
+                    chapter_tasks.append((ch_num, ch_key, ch_text))
 
-                    questions = []
-                    for q in result.get("questions", []):
-                        questions.append({
-                            "full_id": f"ch{ch_num}_{q['id']}",
-                            "local_id": q["id"],
-                            "text": q.get("text", ""),
-                            "choices": q.get("choices", {}),
-                            "has_image": q.get("has_image", False),
-                            "image_group": q.get("image_group"),
-                            "correct_answer": q.get("correct_answer", ""),
-                            "explanation": q.get("explanation", "")
-                        })
+                status_text.text(f"Processing {total_chapters} chapters in parallel...")
 
-                    st.session_state.questions[ch_key] = questions
-                    progress_bar.progress((i + 1) / len(st.session_state.chapters))
+                # Process chapters in parallel using ThreadPoolExecutor
+                completed = 0
+                with ThreadPoolExecutor(max_workers=min(total_chapters, 5)) as executor:
+                    # Submit all chapter extraction tasks
+                    future_to_chapter = {
+                        executor.submit(
+                            process_chapter_extraction,
+                            client, ch_num, ch_key, ch_text, model_id
+                        ): ch_key
+                        for ch_num, ch_key, ch_text in chapter_tasks
+                    }
+
+                    # Collect results as they complete
+                    for future in as_completed(future_to_chapter):
+                        ch_key = future_to_chapter[future]
+                        try:
+                            result_key, questions = future.result()
+                            st.session_state.questions[result_key] = questions
+                            completed += 1
+                            progress_bar.progress(completed / total_chapters)
+                            status_text.text(f"Completed {completed}/{total_chapters} chapters...")
+                        except Exception as e:
+                            st.warning(f"Error processing {ch_key}: {e}")
+                            completed += 1
+                            progress_bar.progress(completed / total_chapters)
 
                 save_questions()
 
@@ -1007,8 +1490,67 @@ def render_questions_step():
                     save_image_assignments()
 
                 status_text.text("Done!")
-                st.success(f"Extracted questions from all {len(st.session_state.chapters)} chapters")
+                st.success(f"Extracted questions from all {total_chapters} chapters")
                 st.rerun()
+
+        # Context association section (only show if questions exist)
+        if st.session_state.questions:
+            st.markdown("---")
+            st.subheader("Context Association")
+            st.caption("Link shared context and images from context-only questions (e.g., '5') to their sub-questions (e.g., '5a', '5b', '5c')")
+
+            ctx_col1, ctx_col2 = st.columns([2, 3])
+            with ctx_col1:
+                if st.button("Associate Context", type="secondary"):
+                    progress_placeholder = st.empty()
+                    progress_placeholder.info("Using AI to analyze questions and identify context relationships...")
+
+                    # Get client for LLM call
+                    assoc_client = get_anthropic_client()
+                    if not assoc_client:
+                        st.error("ANTHROPIC_API_KEY not set. Please configure your .env file.")
+                    else:
+                        # Run LLM-based context association
+                        updated_questions, updated_assignments, stats = associate_context_llm(
+                            assoc_client,
+                            st.session_state.questions,
+                            st.session_state.image_assignments
+                        )
+
+                        # Update session state
+                        st.session_state.questions = updated_questions
+                        st.session_state.image_assignments = updated_assignments
+
+                        # Save both
+                        save_questions()
+                        save_image_assignments()
+
+                        progress_placeholder.empty()
+
+                        if stats["context_questions_found"] == 0:
+                            st.warning("No context-only questions found. Context questions should have text but NO answer choices.")
+                        else:
+                            st.success(
+                                f"Found {stats['context_questions_found']} context question(s). "
+                                f"Merged context into {stats['sub_questions_updated']} sub-question(s). "
+                                f"Copied {stats['images_copied']} image assignment(s)."
+                            )
+                        st.rerun()
+
+            with ctx_col2:
+                # Show current context status
+                context_only = sum(
+                    1 for qs in st.session_state.questions.values()
+                    for q in qs if q.get("is_context_only")
+                )
+                merged_count = sum(
+                    1 for qs in st.session_state.questions.values()
+                    for q in qs if q.get("context_merged")
+                )
+                if context_only > 0 or merged_count > 0:
+                    st.info(f"Status: {context_only} context-only entries (will skip in Anki), {merged_count} questions with merged context")
+                else:
+                    st.caption("No context associations yet. Click 'Associate Context' after extracting questions.")
 
         # Preview extracted questions
         if ch_key in st.session_state.questions:
@@ -1016,7 +1558,16 @@ def render_questions_step():
             st.subheader(f"Questions in Chapter {ch_num}")
 
             questions = st.session_state.questions[ch_key]
-            st.info(f"Total: {len(questions)} questions")
+
+            # Count different types
+            total = len(questions)
+            context_only_count = sum(1 for q in questions if q.get("is_context_only"))
+            merged_count = sum(1 for q in questions if q.get("context_merged"))
+            actual_questions = total - context_only_count
+
+            st.info(f"Total: {actual_questions} questions" +
+                   (f" + {context_only_count} context-only" if context_only_count > 0 else "") +
+                   (f" ({merged_count} with merged context)" if merged_count > 0 else ""))
 
             # Question list
             for q in questions:
@@ -1024,24 +1575,48 @@ def render_questions_step():
                 q_images = [img for img in st.session_state.images
                            if st.session_state.image_assignments.get(img["filename"]) == q["full_id"]]
 
-                # Show indicator: 📷(n) if has images, 📷? if needs but none assigned
-                if q_images:
-                    img_indicator = f" [{len(q_images)} img]"
-                elif q.get("has_image"):
-                    img_indicator = " [needs img]"
-                else:
-                    img_indicator = ""
+                # Build status indicators
+                indicators = []
 
-                with st.expander(f"Q{q['local_id']}{img_indicator}: {q['text'][:70]}..."):
+                # Context status
+                if q.get("is_context_only"):
+                    indicators.append("[CTX-ONLY]")
+                elif q.get("context_merged"):
+                    indicators.append("[+CTX]")
+
+                # Image status
+                if q_images:
+                    indicators.append(f"[{len(q_images)} img]")
+                elif q.get("has_image"):
+                    indicators.append("[needs img]")
+
+                indicator_str = " ".join(indicators)
+                if indicator_str:
+                    indicator_str = " " + indicator_str
+
+                # Truncate text for display
+                display_text = q['text'][:70] + "..." if len(q['text']) > 70 else q['text']
+
+                with st.expander(f"Q{q['local_id']}{indicator_str}: {display_text}"):
                     col1, col2 = st.columns([2, 1])
 
                     with col1:
+                        # Show context-only warning
+                        if q.get("is_context_only"):
+                            st.warning("**CONTEXT ONLY** - This provides context for sub-questions and will NOT become an Anki card")
+
+                        # Show merged context indicator
+                        if q.get("context_merged"):
+                            st.success(f"Context merged from Q{q.get('context_from', '?').split('_')[-1]}")
+
                         st.markdown(f"**Question:** {q['text']}")
-                        st.markdown("**Choices:**")
-                        for letter, choice in q.get("choices", {}).items():
-                            st.markdown(f"- {letter}: {choice}")
-                        st.markdown(f"**Correct Answer:** {q.get('correct_answer', 'N/A')}")
-                        st.markdown(f"**Explanation:** {q.get('explanation', 'N/A')}")
+
+                        if q.get("choices"):
+                            st.markdown("**Choices:**")
+                            for letter, choice in q.get("choices", {}).items():
+                                st.markdown(f"- {letter}: {choice}")
+                            st.markdown(f"**Correct Answer:** {q.get('correct_answer', 'N/A')}")
+                            st.markdown(f"**Explanation:** {q.get('explanation', 'N/A')}")
 
                     with col2:
                         if q_images:
@@ -1061,15 +1636,55 @@ def question_sort_key(q_id: str) -> tuple:
 
 
 def get_images_for_question(q_id: str) -> list[dict]:
-    """Get all images directly assigned to a specific question."""
-    # Return only images explicitly assigned to this question ID
-    # Do NOT share images across questions with the same image_group,
-    # as each question typically has its own distinct image
+    """
+    Get all images for a question, including shared images from image_group.
+
+    For multi-part questions (e.g., 5a, 5b, 5c sharing context "5"):
+    - First checks for directly assigned images
+    - Then checks if question belongs to an image_group
+    - If in a group, also returns images assigned to the group's base question
+
+    Example: If ch1_5a has image_group="5", and an image is assigned to ch1_5,
+             then calling get_images_for_question("ch1_5a") returns that image.
+    """
     images = []
+    directly_assigned = set()
+
+    # First, get directly assigned images
     for img in st.session_state.images:
         assigned_to = st.session_state.image_assignments.get(img["filename"])
         if assigned_to == q_id:
             images.append(img)
+            directly_assigned.add(img["filename"])
+
+    # If we found direct images, return them
+    if images:
+        return images
+
+    # Otherwise, check for image_group inheritance
+    # Find the question and its image_group
+    for ch_key, qs in st.session_state.questions.items():
+        for q in qs:
+            if q["full_id"] == q_id:
+                image_group = q.get("image_group")
+                if not image_group:
+                    return images  # No group, return whatever we have
+
+                # Extract chapter prefix from q_id (e.g., "ch1" from "ch1_5a")
+                ch_prefix = q_id.split("_")[0]
+
+                # Build the base question ID from the image_group
+                # e.g., if q_id="ch1_5a" and image_group="5", base_id="ch1_5"
+                base_id = f"{ch_prefix}_{image_group}"
+
+                # Look for images assigned to the base question
+                for img in st.session_state.images:
+                    assigned_to = st.session_state.image_assignments.get(img["filename"])
+                    if assigned_to == base_id and img["filename"] not in directly_assigned:
+                        images.append(img)
+
+                return images
+
     return images
 
 
@@ -1111,12 +1726,14 @@ def render_qc_step():
     st.caption(f"Progress: {reviewed_count}/{total} questions reviewed")
 
     # Filter options
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         filter_option = st.radio("Show:", ["All", "Unreviewed only", "Reviewed only"], horizontal=True)
     with col2:
         chapter_filter = st.selectbox("Filter by chapter:",
                                        ["All chapters"] + list(st.session_state.questions.keys()))
+    with col3:
+        hide_context = st.checkbox("Hide context-only entries", value=True)
 
     # Filter questions
     filtered_questions = []
@@ -1131,6 +1748,8 @@ def render_qc_step():
             continue
         if chapter_filter != "All chapters" and ch_key != chapter_filter:
             continue
+        if hide_context and q.get("is_context_only"):
+            continue
 
         filtered_questions.append((ch_key, q))
 
@@ -1138,7 +1757,15 @@ def render_qc_step():
 
     # Question selector with session state for navigation
     if filtered_questions:
-        question_options = [f"{q['full_id']}: {q['text'][:50]}..." for _, q in filtered_questions]
+        def format_question_option(q):
+            prefix = ""
+            if q.get("is_context_only"):
+                prefix = "[CTX] "
+            elif q.get("context"):
+                prefix = "[+ctx] "
+            return f"{prefix}{q['full_id']}: {q['text'][:50]}..."
+
+        question_options = [format_question_option(q) for _, q in filtered_questions]
 
         # Ensure selected index is within bounds
         if st.session_state.qc_selected_idx >= len(filtered_questions):
@@ -1181,16 +1808,29 @@ def render_qc_step():
             with left_col:
                 # Display question
                 st.subheader(f"Question {q['local_id']}")
-                st.markdown(f"**{q['text']}**")
 
-                st.markdown("**Choices:**")
-                for letter, choice in q.get("choices", {}).items():
-                    if letter == q.get("correct_answer"):
-                        st.markdown(f"- **{letter}: {choice}** ✓")
+                # Check if this is a context-only question
+                if q.get("is_context_only"):
+                    st.warning("**CONTEXT ONLY** - This entry provides context for sub-questions and will not be exported to Anki.")
+                    st.markdown(f"**Context Text:**\n\n{q['text']}")
+                else:
+                    # Show inherited context if this is a sub-question
+                    if q.get("context"):
+                        st.info(f"**Context (from Q{q.get('context_question_id', '?')}):**\n\n{q['context']}")
+
+                    st.markdown(f"**Question:** {q['text']}")
+
+                    if q.get("choices"):
+                        st.markdown("**Choices:**")
+                        for letter, choice in q.get("choices", {}).items():
+                            if letter == q.get("correct_answer"):
+                                st.markdown(f"- **{letter}: {choice}** ✓")
+                            else:
+                                st.markdown(f"- {letter}: {choice}")
                     else:
-                        st.markdown(f"- {letter}: {choice}")
+                        st.caption("No answer choices")
 
-                st.markdown(f"**Explanation:** {q.get('explanation', 'N/A')}")
+                    st.markdown(f"**Explanation:** {q.get('explanation', 'N/A')}")
 
                 # Show current status
                 if q_id in reviewed:

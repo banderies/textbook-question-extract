@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Textbook Question Extractor - A Python pipeline for extracting Q&A pairs from PDF textbooks and generating Anki flashcard decks. Uses a hybrid approach combining traditional PDF processing with Claude AI for intelligent semantic matching.
+Textbook Question Extractor - A Python pipeline for extracting Q&A pairs from PDF textbooks and generating Anki flashcard decks. Uses Claude AI for intelligent semantic extraction and image-question matching.
 
 ## Architecture
 
@@ -14,19 +14,20 @@ Textbook Question Extractor - A Python pipeline for extracting Q&A pairs from PD
 PDF Input
     ↓
 PHASE 1: PREPROCESSING
-├── docling: PDF → Markdown (structure preservation)
-├── PyMuPDF: Extract images with page/Y coordinates
-├── Chapter detection: Identify chapters and parse questions
-└── Output: docling/*.md + images/ + output/*.json
+├── PyMuPDF: Extract text pages and images with positions
+├── Chapter detection: LLM identifies chapter boundaries
+├── Flanking text: Extract context before/after each image
+└── Output: images/*.jpg + output/images.json
     ↓
-PHASE 2: SEMANTIC MATCHING (AI-Powered)
-├── Claude API: Match questions to answers semantically
-├── Figure number matching: Use figure refs + content
-└── Output: Structured JSON with matched pairs
+PHASE 2: EXTRACTION & MATCHING
+├── Claude API: Extract Q&A pairs per chapter
+├── Image matching: Use flanking text to assign images to questions
+├── Cross-page context: Images at page boundaries get context from adjacent pages
+└── Output: output/questions_by_chapter.json + output/image_assignments.json
     ↓
-PHASE 3: DECK GENERATION
-├── Combine Q&A pairs with images
-├── Format for Anki (genanki library)
+PHASE 3: QC & EXPORT
+├── Streamlit GUI: Review/correct assignments
+├── QC progress tracking: Approve/flag questions
 └── Output: .apkg file (importable to Anki)
 ```
 
@@ -34,12 +35,9 @@ PHASE 3: DECK GENERATION
 
 | Script | Purpose |
 |--------|---------|
-| `agentic_qa_extractor.py` | Main Q&A extraction using Claude Opus 4.5 |
-| `chapter_aware_parser.py` | Parse chapters with chapter-prefixed IDs (e.g., `ch1_2a`) |
+| `review_gui.py` | Main Streamlit GUI - handles all extraction steps |
 | `image_pipeline.py` | Extract images from PDF with positional metadata |
-| `link_images_v2.py` | Block-based image-to-question linking |
-| `review_gui_v2.py` | Streamlit GUI for reviewing/correcting assignments |
-| `test_first_5.py` | Quick validation on first 5 questions |
+| `agentic_qa_extractor.py` | Standalone Q&A extraction using Claude |
 
 ## Commands
 
@@ -50,57 +48,86 @@ conda activate anki-extractor
 export ANTHROPIC_API_KEY='sk-ant-...'
 ```
 
-### Full Pipeline
+### Run the GUI
 ```bash
-./run_extraction.sh "path/to/textbook.pdf"
+streamlit run scripts/review_gui.py
 ```
 
-### Partial Operations
-```bash
-./run_extraction.sh --extract-images "pdf_file.pdf"
-./run_extraction.sh --extract-qa docling/markdown_file.md
-./run_extraction.sh --link-images docling/markdown_file.md
-./run_extraction.sh --build-deck
-./run_extraction.sh --test
-```
+## Data Files
 
-### Direct Script Execution
-```bash
-python scripts/image_pipeline.py extract input.pdf --output images/
-python scripts/chapter_aware_parser.py docling/file.md images/manifest.json
-python scripts/link_images_v2.py docling/file.md images/manifest.json
-streamlit run scripts/review_gui_v2.py
-python scripts/test_first_5.py
-```
+All state is persisted to JSON files in `output/`:
+
+| File | Contents |
+|------|----------|
+| `chapters.json` | Detected chapters with page ranges |
+| `chapter_text.json` | Extracted text per chapter |
+| `questions_by_chapter.json` | Extracted Q&A pairs |
+| `images.json` | Image metadata with flanking text context |
+| `image_assignments.json` | Image filename → question ID mapping |
+| `qc_progress.json` | QC review status per question |
+| `settings.json` | UI state (model, step, QC position) |
 
 ## Key Design Patterns
 
-### Agentic LLM Pattern
-Uses Claude for semantic understanding rather than regex. Questions and answers are sent to Claude, which returns structured JSON with matched pairs and confidence levels.
+### Dynamic Model Selection
+- Models fetched from Anthropic API via `GET /v1/models`
+- Cached after first fetch, falls back to static list if API unavailable
+- User can select model per extraction step
+
+### Flanking Text for Image Matching
+Images are matched to questions using surrounding text context:
+1. Extract 500 chars before and after each image
+2. Cross-page boundaries: images at top of page get context from previous page
+3. LLM prompt: "Find the LAST question number in text BEFORE image"
 
 ### Chapter-Aware Processing
 Question numbering restarts each chapter, so IDs are prefixed: `2a` becomes `ch1_2a` or `ch8_2a`.
 
-### Block-Based Image Linking
-Instead of position matching, link_images_v2 identifies question blocks and assigns all images within a block to that question.
+### State Persistence
+All changes auto-save to JSON. On app restart:
+- `init_session_state()` calls `load_saved_data()` and `load_settings()`
+- User returns to same step and QC position
 
-## Data Flow
+## Question Formats Supported
 
+### Standard Format
 ```
-Input PDF
-    ↓
-docling/               ← Markdown output (git-ignored)
-images/manifest.json   ← Image metadata (tracked)
-images/*.jpg           ← Raw images (git-ignored)
-    ↓
-output/*.json          ← Parsed chapters, questions, mappings
-    ↓
-final/*.apkg           ← Anki decks (git-ignored)
+Question text here? 2a
+[IMAGE]
+A. Choice A  B. Choice B  C. Choice C  D. Choice D
+```
+
+### Multi-part Format (with shared context)
+```
+Context for questions 5a-5c here. 5
+[SHARED IMAGE]
+Question 5a text? 5a
+A. ...
+Question 5b text? 5b
+A. ...
+```
+- Sub-questions share parent context and image
+- Stored with `shared_context` and `image_group` fields
+
+## API Usage
+
+```python
+# Models are fetched dynamically
+response = client.models.list(limit=100)
+
+# Q&A extraction
+response = client.messages.create(
+    model=get_selected_model_id(),  # User-selected model
+    max_tokens=16000,
+    messages=[{"role": "user", "content": prompt}]
+)
 ```
 
 ## Dependencies
 
 - Python 3.12+
-- Conda for environment management
-- `ANTHROPIC_API_KEY` environment variable required
-- Key packages: docling, pymupdf, anthropic, genanki, streamlit
+- `pymupdf` - PDF text and image extraction
+- `anthropic` - Claude API client
+- `streamlit` - Interactive GUI
+- `genanki` - Anki deck generation
+- `python-dotenv` - Environment variable loading
