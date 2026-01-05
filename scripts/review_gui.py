@@ -37,6 +37,20 @@ SOURCE_DIR = "source"
 OUTPUT_DIR = "output"
 IMAGES_DIR = "output/images"
 
+# Fallback Claude models (used if API fetch fails)
+# Maps model_id -> display_name
+FALLBACK_MODELS = {
+    "claude-opus-4-5-20251101": "Claude Opus 4.5",
+    "claude-sonnet-4-20250514": "Claude Sonnet 4",
+    "claude-3-5-sonnet-20241022": "Claude Sonnet 3.5",
+    "claude-3-5-haiku-20241022": "Claude Haiku 3.5",
+}
+DEFAULT_MODEL_ID = "claude-sonnet-4-20250514"
+DEFAULT_MODEL_NAME = "Claude Sonnet 4"  # Display name for default
+
+# Cache for fetched models
+_cached_models = None
+
 # Files
 CHAPTERS_FILE = f"{OUTPUT_DIR}/chapters.json"
 CHAPTER_TEXT_FILE = f"{OUTPUT_DIR}/chapter_text.json"
@@ -44,6 +58,7 @@ QUESTIONS_FILE = f"{OUTPUT_DIR}/questions_by_chapter.json"
 IMAGES_FILE = f"{OUTPUT_DIR}/images.json"
 IMAGE_ASSIGNMENTS_FILE = f"{OUTPUT_DIR}/image_assignments.json"
 QC_PROGRESS_FILE = f"{OUTPUT_DIR}/qc_progress.json"
+SETTINGS_FILE = f"{OUTPUT_DIR}/settings.json"
 
 
 # =============================================================================
@@ -290,7 +305,7 @@ Return ONLY a JSON object mapping image filenames to question IDs:
 
         try:
             response = client.messages.create(
-                model="claude-opus-4-5-20251101",
+                model=get_selected_model_id(),
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}]
             )
@@ -379,12 +394,65 @@ def get_anthropic_client():
     return anthropic.Anthropic()
 
 
+def fetch_available_models() -> dict:
+    """
+    Fetch available models from the Anthropic API.
+    Returns dict mapping display_name to model_id.
+    Falls back to static list if API call fails.
+    """
+    global _cached_models
+
+    # Return cached models if available
+    if _cached_models is not None:
+        return _cached_models
+
+    try:
+        client = get_anthropic_client()
+        if not client:
+            _cached_models = {v: k for k, v in FALLBACK_MODELS.items()}
+            return _cached_models
+
+        # Fetch models from API
+        import anthropic
+        response = client.models.list(limit=100)
+
+        models = {}
+        for model in response.data:
+            # Use display_name if available, otherwise format the ID
+            display_name = getattr(model, 'display_name', None) or model.id
+            models[display_name] = model.id
+
+        if models:
+            _cached_models = models
+            return _cached_models
+
+    except Exception as e:
+        # Log error but don't fail - use fallback
+        print(f"Failed to fetch models from API: {e}")
+
+    # Fallback to static list
+    _cached_models = {v: k for k, v in FALLBACK_MODELS.items()}
+    return _cached_models
+
+
+def get_model_options() -> list[str]:
+    """Get list of model display names for dropdown."""
+    models = fetch_available_models()
+    return list(models.keys())
+
+
+def get_model_id(display_name: str) -> str:
+    """Get model ID from display name."""
+    models = fetch_available_models()
+    return models.get(display_name, DEFAULT_MODEL_ID)
+
+
 def identify_chapters_llm(client, pages: list[dict]) -> list[dict]:
     """Use Claude to identify chapter boundaries."""
     page_index = create_page_index(pages)
 
     response = client.messages.create(
-        model="claude-opus-4-5-20251101",
+        model=get_selected_model_id(),
         max_tokens=4096,
         messages=[{
             "role": "user",
@@ -436,7 +504,7 @@ def extract_chapter_text(pages: list[dict], start_page: int, end_page: Optional[
 def extract_qa_pairs_llm(client, chapter_num: int, chapter_text: str) -> dict:
     """Use Claude to extract Q&A pairs from a single chapter."""
     response = client.messages.create(
-        model="claude-opus-4-5-20251101",
+        model=get_selected_model_id(),
         max_tokens=16000,
         messages=[{
             "role": "user",
@@ -498,7 +566,10 @@ CHAPTER TEXT:
 # =============================================================================
 
 def init_session_state():
-    """Initialize session state variables."""
+    """Initialize session state variables and auto-load saved data."""
+    # Track if this is a fresh initialization
+    is_fresh_init = "initialized" not in st.session_state
+
     if "pages" not in st.session_state:
         st.session_state.pages = None
     if "chapters" not in st.session_state:
@@ -515,6 +586,16 @@ def init_session_state():
         st.session_state.qc_progress = load_qc_progress()
     if "current_step" not in st.session_state:
         st.session_state.current_step = "source"
+    if "selected_model" not in st.session_state:
+        st.session_state.selected_model = DEFAULT_MODEL_NAME
+    if "qc_selected_idx" not in st.session_state:
+        st.session_state.qc_selected_idx = 0
+
+    # Auto-load saved data on first initialization
+    if is_fresh_init:
+        st.session_state.initialized = True
+        load_saved_data()
+        load_settings()
 
 
 def load_qc_progress() -> dict:
@@ -561,6 +642,32 @@ def save_image_assignments():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     with open(IMAGE_ASSIGNMENTS_FILE, "w") as f:
         json.dump(st.session_state.image_assignments, f, indent=2)
+
+
+def save_settings():
+    """Save user settings to file."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    settings = {
+        "selected_model": st.session_state.selected_model,
+        "current_step": st.session_state.current_step,
+        "qc_selected_idx": st.session_state.qc_selected_idx,
+        "last_saved": datetime.now().isoformat()
+    }
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
+
+
+def load_settings():
+    """Load user settings from file."""
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE) as f:
+            settings = json.load(f)
+            if "selected_model" in settings:
+                st.session_state.selected_model = settings["selected_model"]
+            if "current_step" in settings:
+                st.session_state.current_step = settings["current_step"]
+            if "qc_selected_idx" in settings:
+                st.session_state.qc_selected_idx = settings["qc_selected_idx"]
 
 
 def load_saved_data():
@@ -613,6 +720,7 @@ def render_sidebar():
     for step_id, step_name in steps:
         if st.sidebar.button(step_name, key=f"nav_{step_id}"):
             st.session_state.current_step = step_id
+            save_settings()
 
     st.sidebar.markdown("---")
 
@@ -639,6 +747,26 @@ def render_sidebar():
     reviewed = len(st.session_state.qc_progress.get("reviewed", {}))
     if reviewed > 0:
         st.sidebar.success(f"QC'd: {reviewed}/{q_count}")
+
+    # Model selection
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Model Settings")
+    model_options = get_model_options()
+    current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
+    selected = st.sidebar.selectbox(
+        "Claude Model:",
+        model_options,
+        index=current_idx,
+        key="model_selector"
+    )
+    if selected != st.session_state.selected_model:
+        st.session_state.selected_model = selected
+        save_settings()
+
+
+def get_selected_model_id() -> str:
+    """Get the currently selected Claude model ID."""
+    return get_model_id(st.session_state.selected_model)
 
 
 def render_source_step():
@@ -698,11 +826,20 @@ def render_chapters_step():
         st.error("ANTHROPIC_API_KEY not set. Please configure your .env file.")
         return
 
-    col1, col2 = st.columns([1, 2])
+    col1, col2, col3 = st.columns([2, 2, 1])
 
     with col1:
+        # Inline model selector for this step
+        model_options = get_model_options()
+        current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
+        selected_model = st.selectbox("Model:", model_options, index=current_idx, key="chapters_model")
+        if selected_model != st.session_state.selected_model:
+            st.session_state.selected_model = selected_model
+            save_settings()
+
+    with col2:
         if st.button("Extract Chapters", type="primary"):
-            with st.spinner("Using Claude Opus 4.5 to identify chapters..."):
+            with st.spinner(f"Using {st.session_state.selected_model} to identify chapters..."):
                 chapters = identify_chapters_llm(client, st.session_state.pages)
                 st.session_state.chapters = chapters
 
@@ -779,11 +916,20 @@ def render_questions_step():
         ch_num = ch["chapter_number"]
         ch_key = f"ch{ch_num}"
 
-        col1, col2 = st.columns(2)
+        # Model selector for question extraction
+        model_col, btn_col1, btn_col2 = st.columns([2, 2, 2])
 
-        with col1:
-            if st.button(f"Extract Questions for Chapter {ch_num}", type="primary"):
-                with st.spinner(f"Using Claude Opus 4.5 to extract Q&A from Chapter {ch_num}..."):
+        with model_col:
+            model_options = get_model_options()
+            current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
+            selected_model = st.selectbox("Model:", model_options, index=current_idx, key="questions_model")
+            if selected_model != st.session_state.selected_model:
+                st.session_state.selected_model = selected_model
+                save_settings()
+
+        with btn_col1:
+            if st.button(f"Extract Chapter {ch_num}", type="primary"):
+                with st.spinner(f"Using {st.session_state.selected_model} to extract Q&A from Chapter {ch_num}..."):
                     ch_text = st.session_state.chapter_texts.get(ch_key, "")
                     result = extract_qa_pairs_llm(client, ch_num, ch_text)
 
@@ -818,7 +964,7 @@ def render_questions_step():
                 st.success(f"Extracted {len(questions)} questions from Chapter {ch_num}")
                 st.rerun()
 
-        with col2:
+        with btn_col2:
             if st.button("Extract ALL Chapters"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -990,13 +1136,40 @@ def render_qc_step():
 
     st.caption(f"Showing {len(filtered_questions)} questions")
 
-    # Question selector
+    # Question selector with session state for navigation
     if filtered_questions:
         question_options = [f"{q['full_id']}: {q['text'][:50]}..." for _, q in filtered_questions]
-        selected_idx = st.selectbox("Select question:", range(len(question_options)),
-                                    format_func=lambda x: question_options[x])
 
-        if selected_idx is not None:
+        # Ensure selected index is within bounds
+        if st.session_state.qc_selected_idx >= len(filtered_questions):
+            st.session_state.qc_selected_idx = 0
+
+        # Navigation buttons at the top
+        nav_col1, nav_col2, nav_col3 = st.columns([1, 3, 1])
+        with nav_col1:
+            if st.button("← Previous", disabled=(st.session_state.qc_selected_idx <= 0)):
+                st.session_state.qc_selected_idx -= 1
+                save_settings()
+                st.rerun()
+        with nav_col2:
+            selected_idx = st.selectbox(
+                "Select question:",
+                range(len(question_options)),
+                index=st.session_state.qc_selected_idx,
+                format_func=lambda x: question_options[x],
+                key="qc_question_selector"
+            )
+            if selected_idx != st.session_state.qc_selected_idx:
+                st.session_state.qc_selected_idx = selected_idx
+                save_settings()
+        with nav_col3:
+            if st.button("Next →", disabled=(st.session_state.qc_selected_idx >= len(filtered_questions) - 1)):
+                st.session_state.qc_selected_idx += 1
+                save_settings()
+                st.rerun()
+
+        selected_idx = st.session_state.qc_selected_idx
+        if selected_idx is not None and selected_idx < len(filtered_questions):
             ch_key, q = filtered_questions[selected_idx]
             q_id = q["full_id"]
 
@@ -1076,65 +1249,77 @@ def render_qc_step():
                         else:
                             st.caption("No more unassigned images in this chapter")
 
-                elif q.get("has_image"):
-                    st.subheader("Image Required")
-                    st.warning("This question needs an image but none assigned yet.")
-
-                    # Show unassigned images from same chapter
-                    st.markdown("**Select from chapter images:**")
-                    unassigned = [img for img in st.session_state.images
-                                  if img["filename"] not in st.session_state.image_assignments
-                                  and ch_start <= img["page"] < ch_end]
-
-                    if unassigned:
-                        for img in unassigned[:6]:
-                            filepath = img["filepath"]
-                            if os.path.exists(filepath):
-                                st.image(filepath, caption=f"Page {img['page']}", width=180)
-                                if st.button(f"Assign", key=f"assign_{img['filename']}"):
-                                    st.session_state.image_assignments[img["filename"]] = q_id
-                                    save_image_assignments()
-                                    st.success("Assigned!")
-                                    st.rerun()
-                    else:
-                        st.caption("No unassigned images in this chapter")
                 else:
-                    st.subheader("No Image")
-                    st.caption("This question does not require an image")
+                    # No image currently assigned - show option to add one
+                    if q.get("has_image"):
+                        st.subheader("Image Required")
+                        st.warning("This question needs an image but none assigned yet.")
+                    else:
+                        st.subheader("No Image Assigned")
+                        st.caption("No image currently linked to this question")
+
+                    # Show unassigned images from same chapter for manual linking
+                    with st.expander("Manually assign an image" if not q.get("has_image") else "Select from chapter images", expanded=q.get("has_image", False)):
+                        unassigned = [img for img in st.session_state.images
+                                      if img["filename"] not in st.session_state.image_assignments
+                                      and ch_start <= img["page"] < ch_end]
+
+                        if unassigned:
+                            for img in unassigned[:6]:
+                                filepath = img["filepath"]
+                                if os.path.exists(filepath):
+                                    st.image(filepath, caption=f"Page {img['page']}", width=180)
+                                    if st.button(f"Assign", key=f"assign_{img['filename']}"):
+                                        st.session_state.image_assignments[img["filename"]] = q_id
+                                        save_image_assignments()
+                                        st.success("Assigned!")
+                                        st.rerun()
+                        else:
+                            st.caption("No unassigned images in this chapter")
 
             # QC actions
             st.markdown("---")
+
+            # Check if currently approved
+            is_approved = q_id in reviewed and reviewed[q_id].get("status") == "approved"
+            is_flagged = q_id in reviewed and reviewed[q_id].get("status") == "flagged"
+
             col1, col2, col3, col4 = st.columns(4)
 
             with col1:
-                if st.button("✓ Approve", type="primary"):
+                # Approve & Next button (auto-advances)
+                if st.button("✓ Approve & Next", type="primary", disabled=is_approved):
                     reviewed[q_id] = {"status": "approved", "timestamp": datetime.now().isoformat()}
                     st.session_state.qc_progress["reviewed"] = reviewed
                     save_qc_progress()
-                    st.success("Approved!")
+                    # Auto-advance to next question
+                    if st.session_state.qc_selected_idx < len(filtered_questions) - 1:
+                        st.session_state.qc_selected_idx += 1
+                        save_settings()
                     st.rerun()
 
             with col2:
-                if st.button("✗ Flag Issue"):
+                if st.button("✗ Flag Issue", disabled=is_flagged):
                     reviewed[q_id] = {"status": "flagged", "timestamp": datetime.now().isoformat()}
                     st.session_state.qc_progress["reviewed"] = reviewed
                     save_qc_progress()
-                    st.warning("Flagged for review")
                     st.rerun()
 
             with col3:
-                if st.button("Skip"):
-                    st.rerun()
+                # Unapprove button (only shown if already reviewed)
+                if is_approved or is_flagged:
+                    if st.button("↩ Unapprove"):
+                        reviewed.pop(q_id, None)
+                        st.session_state.qc_progress["reviewed"] = reviewed
+                        save_qc_progress()
+                        st.rerun()
 
             with col4:
-                # Navigate to next unreviewed
-                next_unreviewed = None
-                for i, (_, nq) in enumerate(filtered_questions):
-                    if nq["full_id"] not in reviewed and i > selected_idx:
-                        next_unreviewed = i
-                        break
-                if next_unreviewed:
-                    st.caption(f"Next unreviewed: #{next_unreviewed + 1}")
+                # Show current status
+                if is_approved:
+                    st.success("✓ Approved")
+                elif is_flagged:
+                    st.warning("✗ Flagged")
 
 
 def render_export_step():
