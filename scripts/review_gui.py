@@ -18,6 +18,7 @@ Usage:
 import streamlit as st
 import json
 import os
+import copy
 import re
 from pathlib import Path
 from datetime import datetime
@@ -90,6 +91,14 @@ def get_chapter_text_file() -> str:
 
 def get_questions_file() -> str:
     return f"{get_output_dir()}/questions_by_chapter.json"
+
+
+def get_questions_merged_file() -> str:
+    return f"{get_output_dir()}/questions_merged.json"
+
+
+def get_image_assignments_merged_file() -> str:
+    return f"{get_output_dir()}/image_assignments_merged.json"
 
 
 def get_images_file() -> str:
@@ -944,10 +953,14 @@ def init_session_state():
         st.session_state.chapter_texts = {}
     if "questions" not in st.session_state:
         st.session_state.questions = {}
+    if "questions_merged" not in st.session_state:
+        st.session_state.questions_merged = {}
     if "images" not in st.session_state:
         st.session_state.images = []
     if "image_assignments" not in st.session_state:
         st.session_state.image_assignments = {}
+    if "image_assignments_merged" not in st.session_state:
+        st.session_state.image_assignments_merged = {}
     if "qc_progress" not in st.session_state:
         st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
     if "current_step" not in st.session_state:
@@ -1017,6 +1030,20 @@ def save_image_assignments():
         json.dump(st.session_state.image_assignments, f, indent=2)
 
 
+def save_questions_merged():
+    """Save merged questions (with context associated) to file."""
+    os.makedirs(get_output_dir(), exist_ok=True)
+    with open(get_questions_merged_file(), "w") as f:
+        json.dump(st.session_state.questions_merged, f, indent=2)
+
+
+def save_image_assignments_merged():
+    """Save merged image-to-question assignments to file."""
+    os.makedirs(get_output_dir(), exist_ok=True)
+    with open(get_image_assignments_merged_file(), "w") as f:
+        json.dump(st.session_state.image_assignments_merged, f, indent=2)
+
+
 def save_settings():
     """Save user settings to file."""
     os.makedirs(get_output_dir(), exist_ok=True)
@@ -1051,8 +1078,10 @@ def load_saved_data():
     chapters_file = get_chapters_file()
     chapter_text_file = get_chapter_text_file()
     questions_file = get_questions_file()
+    questions_merged_file = get_questions_merged_file()
     images_file = get_images_file()
     assignments_file = get_image_assignments_file()
+    assignments_merged_file = get_image_assignments_merged_file()
 
     if os.path.exists(pages_file):
         with open(pages_file) as f:
@@ -1066,12 +1095,18 @@ def load_saved_data():
     if os.path.exists(questions_file):
         with open(questions_file) as f:
             st.session_state.questions = json.load(f)
+    if os.path.exists(questions_merged_file):
+        with open(questions_merged_file) as f:
+            st.session_state.questions_merged = json.load(f)
     if os.path.exists(images_file):
         with open(images_file) as f:
             st.session_state.images = json.load(f)
     if os.path.exists(assignments_file):
         with open(assignments_file) as f:
             st.session_state.image_assignments = json.load(f)
+    if os.path.exists(assignments_merged_file):
+        with open(assignments_merged_file) as f:
+            st.session_state.image_assignments_merged = json.load(f)
 
     # Assign chapters to images if chapters exist but images don't have chapter info
     if st.session_state.chapters and st.session_state.images:
@@ -1104,8 +1139,9 @@ def render_sidebar():
         ("source", "1. Select Source"),
         ("chapters", "2. Extract Chapters"),
         ("questions", "3. Extract Questions"),
-        ("qc", "4. QC Questions"),
-        ("export", "5. Export")
+        ("context", "4. Associate Context"),
+        ("qc", "5. QC Questions"),
+        ("export", "6. Export")
     ]
 
     for step_id, step_name in steps:
@@ -1134,6 +1170,12 @@ def render_sidebar():
         st.sidebar.success(f"Images: {img_count} ({assigned} assigned)")
     else:
         st.sidebar.info("Images: Not extracted")
+
+    merged_count = sum(len(qs) for qs in st.session_state.questions_merged.values())
+    if merged_count > 0:
+        st.sidebar.success(f"Context: Associated")
+    else:
+        st.sidebar.info("Context: Not associated")
 
     reviewed = len(st.session_state.qc_progress.get("reviewed", {}))
     if reviewed > 0:
@@ -1166,8 +1208,10 @@ def clear_session_data():
     st.session_state.chapters = None
     st.session_state.chapter_texts = {}
     st.session_state.questions = {}
+    st.session_state.questions_merged = {}
     st.session_state.images = []
     st.session_state.image_assignments = {}
+    st.session_state.image_assignments_merged = {}
     st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
     st.session_state.qc_selected_idx = 0
 
@@ -1493,64 +1537,10 @@ def render_questions_step():
                 st.success(f"Extracted questions from all {total_chapters} chapters")
                 st.rerun()
 
-        # Context association section (only show if questions exist)
+        # Note about context association
         if st.session_state.questions:
             st.markdown("---")
-            st.subheader("Context Association")
-            st.caption("Link shared context and images from context-only questions (e.g., '5') to their sub-questions (e.g., '5a', '5b', '5c')")
-
-            ctx_col1, ctx_col2 = st.columns([2, 3])
-            with ctx_col1:
-                if st.button("Associate Context", type="secondary"):
-                    progress_placeholder = st.empty()
-                    progress_placeholder.info("Using AI to analyze questions and identify context relationships...")
-
-                    # Get client for LLM call
-                    assoc_client = get_anthropic_client()
-                    if not assoc_client:
-                        st.error("ANTHROPIC_API_KEY not set. Please configure your .env file.")
-                    else:
-                        # Run LLM-based context association
-                        updated_questions, updated_assignments, stats = associate_context_llm(
-                            assoc_client,
-                            st.session_state.questions,
-                            st.session_state.image_assignments
-                        )
-
-                        # Update session state
-                        st.session_state.questions = updated_questions
-                        st.session_state.image_assignments = updated_assignments
-
-                        # Save both
-                        save_questions()
-                        save_image_assignments()
-
-                        progress_placeholder.empty()
-
-                        if stats["context_questions_found"] == 0:
-                            st.warning("No context-only questions found. Context questions should have text but NO answer choices.")
-                        else:
-                            st.success(
-                                f"Found {stats['context_questions_found']} context question(s). "
-                                f"Merged context into {stats['sub_questions_updated']} sub-question(s). "
-                                f"Copied {stats['images_copied']} image assignment(s)."
-                            )
-                        st.rerun()
-
-            with ctx_col2:
-                # Show current context status
-                context_only = sum(
-                    1 for qs in st.session_state.questions.values()
-                    for q in qs if q.get("is_context_only")
-                )
-                merged_count = sum(
-                    1 for qs in st.session_state.questions.values()
-                    for q in qs if q.get("context_merged")
-                )
-                if context_only > 0 or merged_count > 0:
-                    st.info(f"Status: {context_only} context-only entries (will skip in Anki), {merged_count} questions with merged context")
-                else:
-                    st.caption("No context associations yet. Click 'Associate Context' after extracting questions.")
+            st.info("**Next step:** Go to **Step 4: Associate Context** to link context and images from parent questions to sub-questions.")
 
         # Preview extracted questions
         if ch_key in st.session_state.questions:
@@ -1697,9 +1687,127 @@ def get_all_question_options() -> list[str]:
     return options
 
 
+def render_context_step():
+    """Render context association step."""
+    st.header("Step 4: Associate Context")
+
+    if not st.session_state.questions:
+        st.warning("Please extract questions first (Step 3)")
+        return
+
+    st.markdown("""
+    This step identifies **context-only questions** (clinical scenarios without answer choices)
+    and associates their text and images with the related sub-questions.
+
+    **Example:**
+    - Q1 contains a clinical scenario and image (no answer choices)
+    - Q1a, Q1b, Q1c are the actual questions with choices
+    - After association, Q1's text is prepended to Q1a/Q1b/Q1c and images are linked
+    """)
+
+    # Count context-only questions (questions without choices)
+    context_only_count = 0
+    total_questions = 0
+    for ch_key, ch_questions in st.session_state.questions.items():
+        for q in ch_questions:
+            total_questions += 1
+            if not q.get("choices"):
+                context_only_count += 1
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Total Questions", total_questions)
+    with col2:
+        st.metric("Potential Context Questions", context_only_count)
+
+    st.markdown("---")
+
+    # Show current merged state
+    merged_count = sum(len(qs) for qs in st.session_state.questions_merged.values())
+    if merged_count > 0:
+        st.success(f"Context already associated. {merged_count} merged questions saved.")
+        if st.button("View Merged Questions Preview"):
+            st.subheader("Merged Questions Preview")
+            for ch_key in sorted(st.session_state.questions_merged.keys()):
+                with st.expander(f"Chapter {ch_key}", expanded=False):
+                    for q in st.session_state.questions_merged[ch_key]:
+                        is_context = q.get("is_context_only", False)
+                        has_merged = q.get("context_merged", False)
+                        status = "🔵 Context-only (excluded)" if is_context else ("🟢 Has merged context" if has_merged else "⚪ Regular")
+                        st.markdown(f"**{q['full_id']}** {status}")
+                        if has_merged:
+                            st.caption(f"Context from: {q.get('context_from', 'N/A')}")
+                        st.text(q.get("text", "")[:200] + "..." if len(q.get("text", "")) > 200 else q.get("text", ""))
+                        st.markdown("---")
+
+    st.markdown("---")
+
+    # Associate Context button
+    if st.button("🔗 Associate Context", type="primary"):
+        try:
+            client = anthropic.Anthropic()
+        except Exception as e:
+            st.error(f"Failed to initialize API client: {e}")
+            return
+
+        with st.spinner("Analyzing questions and associating context..."):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            status_text.text("Sending to LLM for context analysis...")
+            progress_bar.progress(20)
+
+            # Make a deep copy of questions to avoid modifying the original
+            questions_copy = copy.deepcopy(st.session_state.questions)
+            assignments_copy = copy.deepcopy(st.session_state.image_assignments)
+
+            updated_questions, updated_assignments, stats = associate_context_llm(
+                client,
+                questions_copy,
+                assignments_copy
+            )
+
+            progress_bar.progress(80)
+            status_text.text("Saving merged data...")
+
+            # Save to merged state (separate from original)
+            st.session_state.questions_merged = updated_questions
+            st.session_state.image_assignments_merged = updated_assignments
+            save_questions_merged()
+            save_image_assignments_merged()
+
+            progress_bar.progress(100)
+            status_text.text("Done!")
+
+            st.success(
+                f"Context association complete!\n\n"
+                f"- Context questions found: {stats['context_questions_found']}\n"
+                f"- Sub-questions updated: {stats['sub_questions_updated']}\n"
+                f"- Images copied: {stats['images_copied']}"
+            )
+
+            st.rerun()
+
+    # Option to clear merged data
+    if merged_count > 0:
+        st.markdown("---")
+        if st.button("🗑️ Clear Merged Data", type="secondary"):
+            st.session_state.questions_merged = {}
+            st.session_state.image_assignments_merged = {}
+            # Delete files if they exist
+            merged_file = get_questions_merged_file()
+            assignments_merged_file = get_image_assignments_merged_file()
+            if os.path.exists(merged_file):
+                os.remove(merged_file)
+            if os.path.exists(assignments_merged_file):
+                os.remove(assignments_merged_file)
+            st.success("Merged data cleared. Original questions remain intact.")
+            st.rerun()
+
+
 def render_qc_step():
     """Render QC review step."""
-    st.header("Step 4: QC Questions")
+    st.header("Step 5: QC Questions")
 
     if not st.session_state.questions:
         st.warning("Please extract questions first (Step 3)")
@@ -1964,7 +2072,7 @@ def render_qc_step():
 
 def render_export_step():
     """Render export step."""
-    st.header("Step 5: Export to Anki")
+    st.header("Step 6: Export to Anki")
 
     if not st.session_state.questions:
         st.warning("Please extract questions first (Step 3)")
@@ -2012,6 +2120,8 @@ def main():
         render_chapters_step()
     elif step == "questions":
         render_questions_step()
+    elif step == "context":
+        render_context_step()
     elif step == "qc":
         render_qc_step()
     elif step == "export":
