@@ -44,16 +44,9 @@ Thumbs.db
 
 # Project specific - Large files
 *.pdf
-images/*.jpeg
-images/*.jpg
-images/*.png
 
-# Keep manifest but ignore actual images
-!images/manifest.json
-
-# Output files (generated, can be regenerated)
+# Output files (all generated content, can be regenerated)
 output/
-final/
 
 # Streamlit
 .streamlit/

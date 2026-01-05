@@ -35,7 +35,7 @@ st.set_page_config(
 # Paths
 SOURCE_DIR = "source"
 OUTPUT_DIR = "output"
-IMAGES_DIR = "images"
+IMAGES_DIR = "output/images"
 
 # Files
 CHAPTERS_FILE = f"{OUTPUT_DIR}/chapters.json"
@@ -64,8 +64,8 @@ def extract_text_from_pdf(pdf_path: str) -> list[dict]:
 
 def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list[dict]:
     """
-    Extract images from PDF with page numbers and positions.
-    Returns list of image metadata.
+    Extract images from PDF with page numbers, positions, and flanking text context.
+    Returns list of image metadata including text before/after each image.
     """
     os.makedirs(output_dir, exist_ok=True)
     doc = fitz.open(pdf_path)
@@ -74,6 +74,25 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list
     for page_num in range(len(doc)):
         page = doc[page_num]
         image_list = page.get_images(full=True)
+
+        # Get text blocks with positions for context extraction
+        text_dict = page.get_text("dict")
+        text_blocks = []
+        for block in text_dict.get("blocks", []):
+            if block.get("type") == 0:  # Text block
+                block_text = ""
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        block_text += span.get("text", "") + " "
+                if block_text.strip():
+                    text_blocks.append({
+                        "text": block_text.strip(),
+                        "y0": block.get("bbox", [0, 0, 0, 0])[1],  # top y
+                        "y1": block.get("bbox", [0, 0, 0, 0])[3],  # bottom y
+                    })
+
+        # Sort text blocks by y position
+        text_blocks.sort(key=lambda x: x["y0"])
 
         for img_idx, img_info in enumerate(image_list):
             xref = img_info[0]
@@ -88,10 +107,25 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list
                 if img_rects:
                     rect = img_rects[0]
                     y_position = rect.y0
+                    y_bottom = rect.y1
                     x_position = rect.x0
                 else:
                     y_position = 0
+                    y_bottom = 0
                     x_position = 0
+
+                # Extract flanking text context
+                text_before = []
+                text_after = []
+                for tb in text_blocks:
+                    if tb["y1"] < y_position:  # Text ends before image starts
+                        text_before.append(tb["text"])
+                    elif tb["y0"] > y_bottom:  # Text starts after image ends
+                        text_after.append(tb["text"])
+
+                # Keep last 500 chars before and first 500 chars after
+                context_before = " ".join(text_before)[-500:] if text_before else ""
+                context_after = " ".join(text_after)[:500] if text_after else ""
 
                 # Create filename with page and position info
                 filename = f"p{page_num + 1:03d}_y{int(y_position):04d}_x{int(x_position):04d}_{img_idx}.{image_ext}"
@@ -108,7 +142,9 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list
                     "y_position": y_position,
                     "x_position": x_position,
                     "width": rect.width if img_rects else 0,
-                    "height": rect.height if img_rects else 0
+                    "height": rect.height if img_rects else 0,
+                    "context_before": context_before,
+                    "context_after": context_after
                 })
 
             except Exception as e:
@@ -123,56 +159,134 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list
     return images
 
 
-def match_images_to_questions(images: list[dict], chapters: list[dict], questions: dict) -> dict:
+def match_images_to_questions_llm(client, images: list[dict], chapters: list[dict], questions: dict) -> dict:
     """
-    Auto-match images to questions based on page proximity.
+    Use Claude to intelligently match images to questions based on flanking text context.
     Returns dict mapping image filename to question full_id.
     """
     assignments = {}
 
-    # Build a list of questions with their chapter's page range
-    question_pages = []
+    # Process chapter by chapter
     for i, ch in enumerate(chapters):
         ch_num = ch["chapter_number"]
         ch_key = f"ch{ch_num}"
         start_page = ch["start_page"]
         end_page = chapters[i + 1]["start_page"] if i + 1 < len(chapters) else 9999
 
-        if ch_key in questions:
-            for q in questions[ch_key]:
-                question_pages.append({
-                    "full_id": q["full_id"],
-                    "chapter": ch_num,
-                    "start_page": start_page,
-                    "end_page": end_page,
-                    "has_image": q.get("has_image", False)
-                })
+        # Get questions for this chapter
+        ch_questions = questions.get(ch_key, [])
+        if not ch_questions:
+            continue
 
-    # For each image, find the best matching question
-    for img in images:
-        img_page = img["page"]
+        # Get images in this chapter's page range
+        ch_images = [img for img in images if start_page <= img["page"] < end_page]
+        if not ch_images:
+            continue
 
-        # Find questions in chapters that contain this page
-        candidates = [q for q in question_pages
-                      if q["start_page"] <= img_page < q["end_page"]]
+        # Build question summary for the prompt
+        questions_text = []
+        for q in ch_questions:
+            q_summary = f"- {q['full_id']}: {q['text'][:150]}..."
+            if q.get("has_image"):
+                q_summary += " [NEEDS IMAGE]"
+            questions_text.append(q_summary)
 
-        if candidates:
-            # Prefer questions marked as having images
-            image_questions = [q for q in candidates if q["has_image"]]
-            if image_questions:
-                # Assign to first unassigned question with has_image
-                for q in image_questions:
-                    if q["full_id"] not in assignments.values():
-                        assignments[img["filename"]] = q["full_id"]
-                        break
-                else:
-                    # All image questions assigned, use first candidate
-                    assignments[img["filename"]] = candidates[0]["full_id"]
-            else:
-                # No questions marked with images, assign to first in chapter
-                assignments[img["filename"]] = candidates[0]["full_id"]
+        # Build image context for the prompt
+        images_text = []
+        for img in ch_images:
+            img_info = f"- {img['filename']} (page {img['page']})\n"
+            img_info += f"  Text BEFORE image: \"{img.get('context_before', '')[:200]}...\"\n"
+            img_info += f"  Text AFTER image: \"{img.get('context_after', '')[:200]}...\""
+            images_text.append(img_info)
+
+        # Ask Claude to match images to questions
+        prompt = f"""Match images to questions for Chapter {ch_num}.
+
+QUESTIONS:
+{chr(10).join(questions_text)}
+
+IMAGES (with surrounding text context):
+{chr(10).join(images_text)}
+
+Based on the text context around each image, determine which question(s) each image belongs to.
+- Look for question numbers, choice letters (A, B, C, D), or question text in the context
+- An image appearing between a question and its choices belongs to that question
+- Multiple questions (like 2a, 2b, 2c) may share the same image if they reference it together
+- Some images may be decorative or not belong to any question - assign these to "(none)"
+
+Return ONLY a JSON object mapping image filenames to question IDs:
+{{
+  "image_filename.jpeg": "ch{ch_num}_2a",
+  "another_image.jpeg": "(none)"
+}}"""
+
+        try:
+            response = client.messages.create(
+                model="claude-opus-4-5-20251101",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            response_text = response.content[0].text
+
+            # Extract JSON from response
+            if "```" in response_text:
+                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+                if match:
+                    response_text = match.group(1)
+
+            ch_assignments = json.loads(response_text)
+
+            # Add to overall assignments (skip "(none)" assignments)
+            for img_file, q_id in ch_assignments.items():
+                if q_id and q_id != "(none)":
+                    assignments[img_file] = q_id
+
+        except Exception as e:
+            # If LLM matching fails, fall back to simple matching for this chapter
+            print(f"LLM matching failed for chapter {ch_num}: {e}")
+            continue
 
     return assignments
+
+
+def match_images_to_questions_simple(images: list[dict], chapters: list[dict], questions: dict) -> dict:
+    """
+    Simple fallback: match images to questions based on page proximity.
+    Used when LLM matching is not available.
+    """
+    assignments = {}
+
+    for i, ch in enumerate(chapters):
+        ch_num = ch["chapter_number"]
+        ch_key = f"ch{ch_num}"
+        start_page = ch["start_page"]
+        end_page = chapters[i + 1]["start_page"] if i + 1 < len(chapters) else 9999
+
+        ch_questions = [q for q in questions.get(ch_key, []) if q.get("has_image")]
+        ch_images = [img for img in images if start_page <= img["page"] < end_page]
+
+        # Simple assignment: first image to first question needing one, etc.
+        for img, q in zip(ch_images, ch_questions):
+            if q["full_id"] not in assignments.values():
+                assignments[img["filename"]] = q["full_id"]
+
+    return assignments
+
+
+def get_questions_sharing_image(q_id: str, questions: dict) -> list[str]:
+    """Get all question IDs that share the same image_group as the given question."""
+    # Find the question and its image_group
+    for ch_key, qs in questions.items():
+        for q in qs:
+            if q["full_id"] == q_id:
+                image_group = q.get("image_group")
+                if not image_group:
+                    return [q_id]
+                # Find all questions in same chapter with same image_group
+                shared = [qq["full_id"] for qq in qs if qq.get("image_group") == image_group]
+                return shared
+    return [q_id]
 
 
 def create_page_index(pages: list[dict]) -> str:
@@ -269,7 +383,8 @@ TASK:
 IMPORTANT:
 - Questions may have sub-parts like 2a, 2b, 2c - treat each as a separate question
 - Question IDs should match exactly as they appear in the ANSWERS section (e.g., "1", "2a", "2b", "3")
-- Some questions reference figures/images - note when a question mentions "image below" or similar
+- For images: If a question or ANY of its sub-parts reference an image (e.g., "image below", "figure", "radiograph shown"), mark ALL related sub-questions with has_image: true. For example, if questions 2a, 2b, 2c all refer to the same image shown before 2a, then 2a, 2b, AND 2c should ALL have has_image: true
+- Use image_group to indicate which questions share the same image (e.g., "2" for 2a, 2b, 2c sharing one image)
 - Extract the full question text and all answer choices
 
 Return ONLY a JSON object in this exact format:
@@ -286,6 +401,7 @@ Return ONLY a JSON object in this exact format:
         "D": "Choice D text"
       }},
       "has_image": true,
+      "image_group": "1",
       "correct_answer": "B",
       "explanation": "Brief explanation from the answer section"
     }}
@@ -416,7 +532,7 @@ def render_sidebar():
     ]
 
     for step_id, step_name in steps:
-        if st.sidebar.button(step_name, key=f"nav_{step_id}", use_container_width=True):
+        if st.sidebar.button(step_name, key=f"nav_{step_id}"):
             st.session_state.current_step = step_id
 
     st.sidebar.markdown("---")
@@ -593,12 +709,24 @@ def render_questions_step():
                             "text": q.get("text", ""),
                             "choices": q.get("choices", {}),
                             "has_image": q.get("has_image", False),
+                            "image_group": q.get("image_group"),
                             "correct_answer": q.get("correct_answer", ""),
                             "explanation": q.get("explanation", "")
                         })
 
                     st.session_state.questions[ch_key] = questions
                     save_questions()
+
+                    # Auto-match images for this chapter using LLM
+                    if st.session_state.images and st.session_state.chapters:
+                        with st.spinner("Matching images to questions..."):
+                            st.session_state.image_assignments = match_images_to_questions_llm(
+                                client,
+                                st.session_state.images,
+                                st.session_state.chapters,
+                                st.session_state.questions
+                            )
+                            save_image_assignments()
 
                 st.success(f"Extracted {len(questions)} questions from Chapter {ch_num}")
                 st.rerun()
@@ -624,6 +752,7 @@ def render_questions_step():
                             "text": q.get("text", ""),
                             "choices": q.get("choices", {}),
                             "has_image": q.get("has_image", False),
+                            "image_group": q.get("image_group"),
                             "correct_answer": q.get("correct_answer", ""),
                             "explanation": q.get("explanation", "")
                         })
@@ -633,10 +762,11 @@ def render_questions_step():
 
                 save_questions()
 
-                # Auto-match images to questions
+                # Auto-match images to questions using LLM
                 if st.session_state.images:
-                    status_text.text("Matching images to questions...")
-                    st.session_state.image_assignments = match_images_to_questions(
+                    status_text.text("Matching images to questions (using Claude)...")
+                    st.session_state.image_assignments = match_images_to_questions_llm(
+                        client,
                         st.session_state.images,
                         st.session_state.chapters,
                         st.session_state.questions
@@ -657,15 +787,42 @@ def render_questions_step():
 
             # Question list
             for q in questions:
-                with st.expander(f"Q{q['local_id']}: {q['text'][:80]}..."):
-                    st.markdown(f"**Question:** {q['text']}")
-                    st.markdown("**Choices:**")
-                    for letter, choice in q.get("choices", {}).items():
-                        st.markdown(f"- {letter}: {choice}")
-                    st.markdown(f"**Correct Answer:** {q.get('correct_answer', 'N/A')}")
-                    st.markdown(f"**Explanation:** {q.get('explanation', 'N/A')}")
-                    if q.get("has_image"):
-                        st.caption("📷 This question has an associated image")
+                # Check if this question has assigned images (including shared via image_group)
+                shared_ids = get_questions_sharing_image(q["full_id"], st.session_state.questions)
+                q_images = [img for img in st.session_state.images
+                           if st.session_state.image_assignments.get(img["filename"]) in shared_ids]
+
+                # Show indicator: 📷(n) if has images, 📷? if needs but none assigned, 📷↔ if shares image
+                if q_images:
+                    if len(shared_ids) > 1:
+                        img_indicator = f" 📷↔"  # Shared image
+                    else:
+                        img_indicator = f" 📷({len(q_images)})"
+                elif q.get("has_image"):
+                    img_indicator = " 📷?"
+                else:
+                    img_indicator = ""
+
+                with st.expander(f"Q{q['local_id']}{img_indicator}: {q['text'][:70]}..."):
+                    col1, col2 = st.columns([2, 1])
+
+                    with col1:
+                        st.markdown(f"**Question:** {q['text']}")
+                        st.markdown("**Choices:**")
+                        for letter, choice in q.get("choices", {}).items():
+                            st.markdown(f"- {letter}: {choice}")
+                        st.markdown(f"**Correct Answer:** {q.get('correct_answer', 'N/A')}")
+                        st.markdown(f"**Explanation:** {q.get('explanation', 'N/A')}")
+                        if len(shared_ids) > 1:
+                            st.caption(f"Shares image with: {', '.join(shared_ids)}")
+
+                    with col2:
+                        if q_images:
+                            for img in q_images:
+                                if os.path.exists(img["filepath"]):
+                                    st.image(img["filepath"], caption=f"Page {img['page']}", width=200)
+                        elif q.get("has_image"):
+                            st.warning("Needs image assignment")
 
 
 def question_sort_key(q_id: str) -> tuple:
@@ -677,10 +834,14 @@ def question_sort_key(q_id: str) -> tuple:
 
 
 def get_images_for_question(q_id: str) -> list[dict]:
-    """Get all images assigned to a question."""
+    """Get all images assigned to a question, including images shared via image_group."""
+    # Get all question IDs that share the same image (via image_group)
+    shared_q_ids = get_questions_sharing_image(q_id, st.session_state.questions)
+
     images = []
     for img in st.session_state.images:
-        if st.session_state.image_assignments.get(img["filename"]) == q_id:
+        assigned_to = st.session_state.image_assignments.get(img["filename"])
+        if assigned_to in shared_q_ids:
             images.append(img)
     return images
 
@@ -787,59 +948,69 @@ def render_qc_step():
 
             with right_col:
                 # Display images assigned to this question
-                st.subheader("Images")
                 assigned_images = get_images_for_question(q_id)
 
+                # Get chapter page range for showing available images
+                ch_num = int(ch_key[2:])
+                ch_start = next((c["start_page"] for c in st.session_state.chapters if c["chapter_number"] == ch_num), 1)
+                ch_end = 9999
+                for i, c in enumerate(st.session_state.chapters):
+                    if c["chapter_number"] == ch_num and i + 1 < len(st.session_state.chapters):
+                        ch_end = st.session_state.chapters[i + 1]["start_page"]
+
                 if assigned_images:
+                    st.subheader("Assigned Image(s)")
                     for img in assigned_images:
                         filepath = img["filepath"]
                         if os.path.exists(filepath):
-                            st.image(filepath, caption=f"{img['filename']} (page {img['page']})", use_container_width=True)
+                            st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_column_width=True)
 
-                            # Reassignment dropdown for this image
-                            all_q_options = get_all_question_options()
-                            current_idx = all_q_options.index(q_id) if q_id in all_q_options else 0
-
-                            new_assignment = st.selectbox(
-                                f"Reassign {img['filename']}:",
-                                all_q_options,
-                                index=current_idx,
-                                key=f"reassign_{img['filename']}"
-                            )
-
-                            if new_assignment != q_id:
-                                if st.button(f"Save reassignment", key=f"save_{img['filename']}"):
-                                    if new_assignment == "(none)":
-                                        st.session_state.image_assignments.pop(img["filename"], None)
-                                    else:
-                                        st.session_state.image_assignments[img["filename"]] = new_assignment
+                            # Image actions
+                            img_col1, img_col2 = st.columns(2)
+                            with img_col1:
+                                if st.button("✓ Image Correct", key=f"img_ok_{img['filename']}", type="primary"):
+                                    st.success("Image confirmed!")
+                            with img_col2:
+                                if st.button("✗ Remove Image", key=f"img_remove_{img['filename']}"):
+                                    st.session_state.image_assignments.pop(img["filename"], None)
                                     save_image_assignments()
-                                    st.success(f"Reassigned to {new_assignment}")
                                     st.rerun()
                         else:
                             st.warning(f"Image not found: {filepath}")
+
+                    # Option to add more images
+                    with st.expander("Assign different/additional image"):
+                        unassigned = [img for img in st.session_state.images
+                                      if img["filename"] not in st.session_state.image_assignments
+                                      and ch_start <= img["page"] < ch_end]
+                        if unassigned:
+                            for img in unassigned[:5]:
+                                filepath = img["filepath"]
+                                if os.path.exists(filepath):
+                                    st.image(filepath, caption=f"Page {img['page']}", width=150)
+                                    if st.button(f"Add this image", key=f"add_{img['filename']}"):
+                                        st.session_state.image_assignments[img["filename"]] = q_id
+                                        save_image_assignments()
+                                        st.rerun()
+                        else:
+                            st.caption("No more unassigned images in this chapter")
+
                 elif q.get("has_image"):
-                    st.info("This question is marked as having an image, but none assigned yet.")
+                    st.subheader("Image Required")
+                    st.warning("This question needs an image but none assigned yet.")
 
-                    # Show unassigned images from same chapter for easy assignment
-                    st.markdown("**Unassigned images in this chapter:**")
-                    ch_num = int(ch_key[2:])
-                    ch_start = next((c["start_page"] for c in st.session_state.chapters if c["chapter_number"] == ch_num), 1)
-                    ch_end = 9999
-                    for i, c in enumerate(st.session_state.chapters):
-                        if c["chapter_number"] == ch_num and i + 1 < len(st.session_state.chapters):
-                            ch_end = st.session_state.chapters[i + 1]["start_page"]
-
+                    # Show unassigned images from same chapter
+                    st.markdown("**Select from chapter images:**")
                     unassigned = [img for img in st.session_state.images
                                   if img["filename"] not in st.session_state.image_assignments
                                   and ch_start <= img["page"] < ch_end]
 
                     if unassigned:
-                        for img in unassigned[:5]:  # Show first 5
+                        for img in unassigned[:6]:
                             filepath = img["filepath"]
                             if os.path.exists(filepath):
-                                st.image(filepath, caption=f"{img['filename']} (page {img['page']})", width=200)
-                                if st.button(f"Assign to this question", key=f"assign_{img['filename']}"):
+                                st.image(filepath, caption=f"Page {img['page']}", width=180)
+                                if st.button(f"Assign", key=f"assign_{img['filename']}"):
                                     st.session_state.image_assignments[img["filename"]] = q_id
                                     save_image_assignments()
                                     st.success("Assigned!")
@@ -847,7 +1018,8 @@ def render_qc_step():
                     else:
                         st.caption("No unassigned images in this chapter")
                 else:
-                    st.caption("No images assigned to this question")
+                    st.subheader("No Image")
+                    st.caption("This question does not require an image")
 
             # QC actions
             st.markdown("---")
