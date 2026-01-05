@@ -66,18 +66,18 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list
     """
     Extract images from PDF with page numbers, positions, and flanking text context.
     Returns list of image metadata including text before/after each image.
+
+    Flanking text is extracted across page boundaries - if an image is at the top
+    of a page, context_before will include text from the bottom of the previous page.
     """
     os.makedirs(output_dir, exist_ok=True)
     doc = fitz.open(pdf_path)
-    images = []
 
+    # First pass: collect all text blocks from all pages
+    all_text_blocks = []
     for page_num in range(len(doc)):
         page = doc[page_num]
-        image_list = page.get_images(full=True)
-
-        # Get text blocks with positions for context extraction
         text_dict = page.get_text("dict")
-        text_blocks = []
         for block in text_dict.get("blocks", []):
             if block.get("type") == 0:  # Text block
                 block_text = ""
@@ -85,14 +85,21 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list
                     for span in line.get("spans", []):
                         block_text += span.get("text", "") + " "
                 if block_text.strip():
-                    text_blocks.append({
+                    all_text_blocks.append({
                         "text": block_text.strip(),
-                        "y0": block.get("bbox", [0, 0, 0, 0])[1],  # top y
-                        "y1": block.get("bbox", [0, 0, 0, 0])[3],  # bottom y
+                        "page": page_num,
+                        "y0": block.get("bbox", [0, 0, 0, 0])[1],
+                        "y1": block.get("bbox", [0, 0, 0, 0])[3],
                     })
 
-        # Sort text blocks by y position
-        text_blocks.sort(key=lambda x: x["y0"])
+    # Sort all text blocks by page, then y position
+    all_text_blocks.sort(key=lambda x: (x["page"], x["y0"]))
+
+    # Second pass: extract images and find flanking text (across page boundaries)
+    images = []
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        image_list = page.get_images(full=True)
 
         for img_idx, img_info in enumerate(image_list):
             xref = img_info[0]
@@ -114,13 +121,24 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list
                     y_bottom = 0
                     x_position = 0
 
-                # Extract flanking text context
+                # Extract flanking text context across page boundaries
                 text_before = []
                 text_after = []
-                for tb in text_blocks:
-                    if tb["y1"] < y_position:  # Text ends before image starts
+
+                for tb in all_text_blocks:
+                    # Text is BEFORE image if:
+                    # - It's on a previous page, OR
+                    # - It's on the same page and ends before the image starts
+                    if tb["page"] < page_num:
                         text_before.append(tb["text"])
-                    elif tb["y0"] > y_bottom:  # Text starts after image ends
+                    elif tb["page"] == page_num and tb["y1"] < y_position:
+                        text_before.append(tb["text"])
+                    # Text is AFTER image if:
+                    # - It's on a later page, OR
+                    # - It's on the same page and starts after the image ends
+                    elif tb["page"] > page_num:
+                        text_after.append(tb["text"])
+                    elif tb["page"] == page_num and tb["y0"] > y_bottom:
                         text_after.append(tb["text"])
 
                 # Keep last 500 chars before and first 500 chars after
@@ -155,6 +173,41 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str = IMAGES_DIR) -> list
 
     # Sort by page and y-position
     images.sort(key=lambda x: (x["page"], x["y_position"]))
+
+    return images
+
+
+def assign_chapters_to_images(images: list[dict], chapters: list[dict]) -> list[dict]:
+    """
+    Assign chapter numbers to images based on page ranges.
+    This should be called after chapter detection to group images by chapter.
+    """
+    if not chapters:
+        return images
+
+    # Build page range lookup
+    chapter_ranges = []
+    for i, ch in enumerate(chapters):
+        start_page = ch["start_page"]
+        end_page = chapters[i + 1]["start_page"] if i + 1 < len(chapters) else 9999
+        chapter_ranges.append({
+            "chapter_number": ch["chapter_number"],
+            "chapter_key": f"ch{ch['chapter_number']}",
+            "start_page": start_page,
+            "end_page": end_page
+        })
+
+    # Assign chapter to each image
+    for img in images:
+        img_page = img["page"]
+        img["chapter"] = None
+        img["chapter_key"] = None
+
+        for ch_range in chapter_ranges:
+            if ch_range["start_page"] <= img_page < ch_range["end_page"]:
+                img["chapter"] = ch_range["chapter_number"]
+                img["chapter_key"] = ch_range["chapter_key"]
+                break
 
     return images
 
@@ -194,13 +247,26 @@ def match_images_to_questions_llm(client, images: list[dict], chapters: list[dic
         # Build image context for the prompt
         images_text = []
         for img in ch_images:
+            # IMPORTANT: For context_before, use the LAST 300 chars (question number is at the end)
+            # For context_after, use the FIRST 300 chars (choices and next question at the start)
+            ctx_before = img.get('context_before', '')
+            ctx_after = img.get('context_after', '')
             img_info = f"- {img['filename']} (page {img['page']})\n"
-            img_info += f"  Text BEFORE image: \"{img.get('context_before', '')[:200]}...\"\n"
-            img_info += f"  Text AFTER image: \"{img.get('context_after', '')[:200]}...\""
+            img_info += f"  Text BEFORE image: \"...{ctx_before[-300:]}\"\n"
+            img_info += f"  Text AFTER image: \"{ctx_after[:300]}...\""
             images_text.append(img_info)
 
         # Ask Claude to match images to questions
         prompt = f"""Match images to questions for Chapter {ch_num}.
+
+TEXTBOOK STRUCTURE (critical for correct matching):
+In this textbook, each question appears in this order:
+1. Question text ending with the question number (e.g., "...needle placement? 2a")
+2. IMAGE (if the question has one)
+3. Answer choices (A, B, C, D)
+4. Next question...
+
+Therefore: The question number at the END of "Text BEFORE image" tells you which question the image belongs to.
 
 QUESTIONS:
 {chr(10).join(questions_text)}
@@ -208,11 +274,13 @@ QUESTIONS:
 IMAGES (with surrounding text context):
 {chr(10).join(images_text)}
 
-Based on the text context around each image, determine which question(s) each image belongs to.
-- Look for question numbers, choice letters (A, B, C, D), or question text in the context
-- An image appearing between a question and its choices belongs to that question
-- Multiple questions (like 2a, 2b, 2c) may share the same image if they reference it together
-- Some images may be decorative or not belong to any question - assign these to "(none)"
+MATCHING RULES:
+1. Find the LAST question number mentioned in "Text BEFORE image" - that's the question this image belongs to
+2. Example: If text before ends with "...rotator interval approach? 2a" → image belongs to ch{ch_num}_2a
+3. Example: If text before ends with "...mixture for the arthrogram? 2b" → image belongs to ch{ch_num}_2b
+4. The text AFTER typically shows the answer choices, then the NEXT question
+5. Each question has its OWN image - do NOT share images across questions
+6. Decorative images or images not matching any question → assign to "(none)"
 
 Return ONLY a JSON object mapping image filenames to question IDs:
 {{
@@ -513,6 +581,17 @@ def load_saved_data():
         with open(IMAGE_ASSIGNMENTS_FILE) as f:
             st.session_state.image_assignments = json.load(f)
 
+    # Assign chapters to images if chapters exist but images don't have chapter info
+    if st.session_state.chapters and st.session_state.images:
+        needs_chapter_update = any(
+            img.get("chapter") is None for img in st.session_state.images
+        )
+        if needs_chapter_update:
+            st.session_state.images = assign_chapters_to_images(
+                st.session_state.images, st.session_state.chapters
+            )
+            save_images()
+
 
 # =============================================================================
 # UI Components
@@ -637,6 +716,14 @@ def render_chapters_step():
                     )
 
                 save_chapters()
+
+                # Assign chapter numbers to images
+                if st.session_state.images:
+                    st.session_state.images = assign_chapters_to_images(
+                        st.session_state.images, chapters
+                    )
+                    save_images()
+
             st.success(f"Found {len(chapters)} chapters")
             st.rerun()
 
@@ -787,19 +874,15 @@ def render_questions_step():
 
             # Question list
             for q in questions:
-                # Check if this question has assigned images (including shared via image_group)
-                shared_ids = get_questions_sharing_image(q["full_id"], st.session_state.questions)
+                # Check if this question has directly assigned images
                 q_images = [img for img in st.session_state.images
-                           if st.session_state.image_assignments.get(img["filename"]) in shared_ids]
+                           if st.session_state.image_assignments.get(img["filename"]) == q["full_id"]]
 
-                # Show indicator: 📷(n) if has images, 📷? if needs but none assigned, 📷↔ if shares image
+                # Show indicator: 📷(n) if has images, 📷? if needs but none assigned
                 if q_images:
-                    if len(shared_ids) > 1:
-                        img_indicator = f" 📷↔"  # Shared image
-                    else:
-                        img_indicator = f" 📷({len(q_images)})"
+                    img_indicator = f" [{len(q_images)} img]"
                 elif q.get("has_image"):
-                    img_indicator = " 📷?"
+                    img_indicator = " [needs img]"
                 else:
                     img_indicator = ""
 
@@ -813,8 +896,6 @@ def render_questions_step():
                             st.markdown(f"- {letter}: {choice}")
                         st.markdown(f"**Correct Answer:** {q.get('correct_answer', 'N/A')}")
                         st.markdown(f"**Explanation:** {q.get('explanation', 'N/A')}")
-                        if len(shared_ids) > 1:
-                            st.caption(f"Shares image with: {', '.join(shared_ids)}")
 
                     with col2:
                         if q_images:
@@ -834,14 +915,14 @@ def question_sort_key(q_id: str) -> tuple:
 
 
 def get_images_for_question(q_id: str) -> list[dict]:
-    """Get all images assigned to a question, including images shared via image_group."""
-    # Get all question IDs that share the same image (via image_group)
-    shared_q_ids = get_questions_sharing_image(q_id, st.session_state.questions)
-
+    """Get all images directly assigned to a specific question."""
+    # Return only images explicitly assigned to this question ID
+    # Do NOT share images across questions with the same image_group,
+    # as each question typically has its own distinct image
     images = []
     for img in st.session_state.images:
         assigned_to = st.session_state.image_assignments.get(img["filename"])
-        if assigned_to in shared_q_ids:
+        if assigned_to == q_id:
             images.append(img)
     return images
 
