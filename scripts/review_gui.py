@@ -1742,50 +1742,65 @@ def render_context_step():
 
     st.markdown("---")
 
-    # Associate Context button
-    if st.button("🔗 Associate Context", type="primary"):
-        client = get_anthropic_client()
-        if not client:
-            st.error("ANTHROPIC_API_KEY not set. Please set the environment variable.")
-            return
+    # Model selector and Associate Context button
+    col1, col2 = st.columns([2, 3])
 
-        with st.spinner("Analyzing questions and associating context..."):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+    with col1:
+        model_options = get_model_options()
+        current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
+        selected_model = st.selectbox("Model:", model_options, index=current_idx, key="context_model")
+        if selected_model != st.session_state.selected_model:
+            st.session_state.selected_model = selected_model
+            save_settings()
 
-            status_text.text("Sending to LLM for context analysis...")
-            progress_bar.progress(20)
+    with col2:
+        st.write("")  # Spacer for alignment
+        if st.button("🔗 Associate Context", type="primary"):
+            client = get_anthropic_client()
+            if not client:
+                st.error("ANTHROPIC_API_KEY not set. Please set the environment variable.")
+            else:
+                with st.spinner("Analyzing questions and associating context..."):
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
 
-            # Make a deep copy of questions to avoid modifying the original
-            questions_copy = copy.deepcopy(st.session_state.questions)
-            assignments_copy = copy.deepcopy(st.session_state.image_assignments)
+                    status_text.text(f"Using {st.session_state.selected_model} for context analysis...")
+                    progress_bar.progress(20)
 
-            updated_questions, updated_assignments, stats = associate_context_llm(
-                client,
-                questions_copy,
-                assignments_copy
-            )
+                    # Make a deep copy of questions to avoid modifying the original
+                    questions_copy = copy.deepcopy(st.session_state.questions)
+                    assignments_copy = copy.deepcopy(st.session_state.image_assignments)
 
-            progress_bar.progress(80)
-            status_text.text("Saving merged data...")
+                    # Get model ID for the selected model
+                    model_id = get_model_id(st.session_state.selected_model)
 
-            # Save to merged state (separate from original)
-            st.session_state.questions_merged = updated_questions
-            st.session_state.image_assignments_merged = updated_assignments
-            save_questions_merged()
-            save_image_assignments_merged()
+                    updated_questions, updated_assignments, stats = associate_context_llm(
+                        client,
+                        questions_copy,
+                        assignments_copy,
+                        model_id=model_id
+                    )
 
-            progress_bar.progress(100)
-            status_text.text("Done!")
+                    progress_bar.progress(80)
+                    status_text.text("Saving merged data...")
 
-            st.success(
-                f"Context association complete!\n\n"
-                f"- Context questions found: {stats['context_questions_found']}\n"
-                f"- Sub-questions updated: {stats['sub_questions_updated']}\n"
-                f"- Images copied: {stats['images_copied']}"
-            )
+                    # Save to merged state (separate from original)
+                    st.session_state.questions_merged = updated_questions
+                    st.session_state.image_assignments_merged = updated_assignments
+                    save_questions_merged()
+                    save_image_assignments_merged()
 
-            st.rerun()
+                    progress_bar.progress(100)
+                    status_text.text("Done!")
+
+                    st.success(
+                        f"Context association complete!\n\n"
+                        f"- Context questions found: {stats['context_questions_found']}\n"
+                        f"- Sub-questions updated: {stats['sub_questions_updated']}\n"
+                        f"- Images copied: {stats['images_copied']}"
+                    )
+
+                    st.rerun()
 
     # Option to clear merged data
     if merged_count > 0:
