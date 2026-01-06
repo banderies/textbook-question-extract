@@ -40,6 +40,14 @@ extract_qa_pairs:
     3. Match each question to its answer
     4. Identify the correct answer choice (A, B, C, D, or E)
 
+    CRITICAL - VERBATIM EXTRACTION:
+    You MUST copy all text EXACTLY as it appears in the source. Do NOT paraphrase, summarize, or shorten:
+    - Question text: Copy the COMPLETE question text word-for-word
+    - Answer choices: Copy each choice (A, B, C, D, E) EXACTLY as written
+    - Explanations: Copy the COMPLETE explanation/answer text VERBATIM from the ANSWERS section
+
+    Do NOT truncate or abbreviate any text. Include every word from the original.
+
     IMPORTANT - MULTI-PART QUESTIONS:
     Some questions follow a multi-part format:
     - A "context question" (e.g., "1") contains a clinical scenario/case and possibly an image, but NO answer choices
@@ -56,7 +64,6 @@ extract_qa_pairs:
     - Question IDs should match exactly as they appear (e.g., "1", "1a", "1b", "2a", "2b", "3")
     - For images: If a question references an image (e.g., "image below", "figure", "radiograph shown"), mark has_image: true
     - Use image_group to indicate which questions share the same image (e.g., "1" for questions 1, 1a, 1b, 1c sharing one image)
-    - Extract the full question text and all answer choices (if present)
 
     Return ONLY a JSON object in this exact format:
     {{
@@ -64,7 +71,7 @@ extract_qa_pairs:
       "questions": [
         {{
           "id": "1",
-          "text": "Clinical scenario/context text here (no answer choices)",
+          "text": "Complete clinical scenario/context text copied verbatim",
           "choices": {{}},
           "has_image": true,
           "image_group": "1",
@@ -73,17 +80,17 @@ extract_qa_pairs:
         }},
         {{
           "id": "1a",
-          "text": "First sub-question text",
+          "text": "Complete question text copied verbatim",
           "choices": {{
-            "A": "Choice A text",
-            "B": "Choice B text",
-            "C": "Choice C text",
-            "D": "Choice D text"
+            "A": "Complete choice A text verbatim",
+            "B": "Complete choice B text verbatim",
+            "C": "Complete choice C text verbatim",
+            "D": "Complete choice D text verbatim"
           }},
           "has_image": false,
           "image_group": "1",
           "correct_answer": "B",
-          "explanation": "Brief explanation from the answer section"
+          "explanation": "Complete explanation copied verbatim from the ANSWERS section"
         }}
       ]
     }}

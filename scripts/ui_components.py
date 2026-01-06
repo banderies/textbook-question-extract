@@ -28,7 +28,8 @@ from pdf_extraction import (
 from llm_extraction import (
     get_anthropic_client, get_model_options, get_model_id,
     identify_chapters_llm, extract_qa_pairs_llm, process_chapter_extraction,
-    match_images_to_questions_llm, associate_context_llm, add_page_numbers_to_questions
+    match_images_to_questions_llm, associate_context_llm, add_page_numbers_to_questions,
+    load_prompts, save_prompts, reload_prompts
 )
 
 
@@ -131,7 +132,8 @@ def render_sidebar():
         ("questions", "3. Extract Questions"),
         ("context", "4. Associate Context"),
         ("qc", "5. QC Questions"),
-        ("export", "6. Export")
+        ("export", "6. Export"),
+        ("prompts", "7. Edit Prompts")
     ]
 
     for step_id, step_name in steps:
@@ -833,19 +835,14 @@ def render_qc_step():
                                        ["All chapters"] + list(st.session_state.questions.keys()))
     with col3:
         hide_context = st.checkbox("Hide context-only entries", value=True)
-
-    # Page number detection - always show the button
-    with st.expander("PDF Page Detection", expanded=False):
-        st.caption("Detect which PDF pages contain each question and answer for the PDF preview feature.")
-        if st.button("Detect All Page Numbers", type="primary"):
-            with st.spinner("Detecting page numbers for all questions..."):
+        if st.button("Detect Page Numbers", help="Detect PDF pages for each question"):
+            with st.spinner("Detecting page numbers..."):
                 add_page_numbers_to_questions(
                     st.session_state.questions,
                     st.session_state.pages,
                     st.session_state.chapters
                 )
                 save_questions()
-                st.success("Page numbers detected!")
                 st.rerun()
 
     filtered_questions = []
@@ -1139,6 +1136,160 @@ def render_qc_step():
 # Step 6: Export
 # =============================================================================
 
+def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_assignments: dict,
+                       images: list, include_images: bool, only_approved: bool, qc_progress: dict) -> str:
+    """Generate Anki deck and return path to .apkg file."""
+    import genanki
+    import hashlib
+
+    # Generate stable IDs based on name
+    def stable_id(name: str) -> int:
+        return int(hashlib.md5(name.encode()).hexdigest()[:8], 16)
+
+    model_id = stable_id(f"{book_name}_model")
+
+    # Create card model (template)
+    model = genanki.Model(
+        model_id,
+        f'{book_name} Model',
+        fields=[
+            {'name': 'Question'},
+            {'name': 'Choices'},
+            {'name': 'Answer'},
+            {'name': 'Explanation'},
+            {'name': 'Image'},
+            {'name': 'Chapter'},
+        ],
+        templates=[
+            {
+                'name': 'Card 1',
+                'qfmt': '''
+                    <div class="question">{{Question}}</div>
+                    {{#Image}}<div class="image">{{Image}}</div>{{/Image}}
+                    <div class="choices">{{Choices}}</div>
+                ''',
+                'afmt': '''
+                    {{FrontSide}}
+                    <hr id="answer">
+                    <div class="answer"><b>Answer:</b> {{Answer}}</div>
+                    <div class="explanation">{{Explanation}}</div>
+                ''',
+            },
+        ],
+        css='''
+            .card { font-family: arial; font-size: 16px; text-align: left; }
+            .question { font-weight: bold; margin-bottom: 10px; }
+            .choices { margin: 10px 0; }
+            .answer { color: green; font-weight: bold; margin: 10px 0; }
+            .explanation { margin-top: 10px; font-style: italic; }
+            .image { margin: 10px 0; }
+            .image img { max-width: 100%; height: auto; }
+        '''
+    )
+
+    # Build image lookup
+    image_lookup = {img['filename']: img for img in images}
+
+    # Track media files to include
+    media_files = []
+
+    # Collect all chapter decks
+    all_decks = []
+
+    # Create sub-decks for each chapter
+    reviewed = qc_progress.get("reviewed", {})
+
+    for ch in chapters:
+        ch_num = ch['chapter_number']
+        ch_key = f"ch{ch_num}"
+        ch_title = ch.get('title', f'Chapter {ch_num}')
+        ch_questions = questions.get(ch_key, [])
+
+        if not ch_questions:
+            continue
+
+        # Create chapter sub-deck
+        ch_deck_name = f"{book_name}::{ch_num}. {ch_title}"
+        ch_deck_id = stable_id(ch_deck_name)
+        ch_deck = genanki.Deck(ch_deck_id, ch_deck_name)
+
+        for q in ch_questions:
+            q_id = q['full_id']
+
+            # Skip context-only questions
+            if q.get('is_context_only'):
+                continue
+
+            # Skip if only approved and not approved
+            if only_approved:
+                review_status = reviewed.get(q_id, {}).get('status')
+                if review_status != 'approved':
+                    continue
+
+            # Build question text (include context if merged)
+            q_text = q.get('text', '')
+
+            # Build choices HTML
+            choices = q.get('choices', {})
+            if choices:
+                choices_html = '<br>'.join([f"{letter}. {text}" for letter, text in sorted(choices.items())])
+            else:
+                choices_html = ''
+
+            # Get correct answer
+            correct = q.get('correct_answer', '')
+
+            # Get explanation
+            explanation = q.get('explanation', '')
+
+            # Handle image
+            image_html = ''
+            if include_images:
+                # Find images assigned to this question
+                assigned_imgs = [fname for fname, assigned_q in image_assignments.items() if assigned_q == q_id]
+
+                # Also check for inherited images via context_from
+                if not assigned_imgs and q.get('context_from'):
+                    context_id = q['context_from']
+                    assigned_imgs = [fname for fname, assigned_q in image_assignments.items() if assigned_q == context_id]
+
+                for img_fname in assigned_imgs:
+                    if img_fname in image_lookup:
+                        img_data = image_lookup[img_fname]
+                        filepath = img_data.get('filepath', '')
+                        if os.path.exists(filepath):
+                            media_files.append(filepath)
+                            image_html += f'<img src="{img_fname}">'
+
+            # Create note
+            note = genanki.Note(
+                model=model,
+                fields=[q_text, choices_html, correct, explanation, image_html, ch_title],
+                tags=[f"chapter{ch_num}"]
+            )
+            ch_deck.notes.append(note)
+
+        # Add chapter deck to list if it has notes
+        if ch_deck.notes:
+            all_decks.append(ch_deck)
+
+    # Create package with all chapter decks
+    output_dir = get_output_dir()
+    safe_name = re.sub(r'[^\w\-]', '_', book_name)
+    output_path = os.path.join(output_dir, f"{safe_name}.apkg")
+
+    if not all_decks:
+        raise ValueError("No cards to export")
+
+    package = genanki.Package(all_decks)
+    if media_files:
+        package.media_files = media_files
+
+    package.write_to_file(output_path)
+
+    return output_path
+
+
 def render_export_step():
     """Render export step."""
     st.header("Step 6: Export to Anki")
@@ -1147,26 +1298,148 @@ def render_export_step():
         st.warning("Please extract questions first (Step 3)")
         return
 
+    # Calculate stats
     total = sum(len(qs) for qs in st.session_state.questions.values())
+    context_only = sum(1 for qs in st.session_state.questions.values()
+                       for q in qs if q.get('is_context_only'))
+    exportable = total - context_only
+
     reviewed = st.session_state.qc_progress.get("reviewed", {})
     approved = sum(1 for r in reviewed.values() if r.get("status") == "approved")
 
-    st.info(f"Total questions: {total}")
-    st.info(f"Approved (QC'd): {approved}")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Questions", total)
+    with col2:
+        st.metric("Exportable", exportable, help="Excludes context-only entries")
+    with col3:
+        st.metric("Approved (QC'd)", approved)
 
     st.markdown("---")
 
-    export_option = st.radio("Export:", [
-        "All questions",
-        "Only approved (QC'd) questions"
-    ])
+    # Book name setting
+    default_name = Path(st.session_state.current_pdf).stem if st.session_state.current_pdf else "Textbook"
+    default_name = default_name.replace('_', ' ').replace('-', ' ')
 
+    book_name = st.text_input("Book Name (used as deck name)",
+                              value=default_name,
+                              help="This will be the parent deck name in Anki")
+
+    # Export options
+    col1, col2 = st.columns(2)
+    with col1:
+        only_approved = st.checkbox("Only export approved questions",
+                                   value=False,
+                                   help="Only include questions marked as approved in QC")
+    with col2:
+        include_images = st.checkbox("Include images",
+                                    value=True,
+                                    help="Embed assigned images in cards")
+
+    st.markdown("---")
+
+    # Preview deck structure
+    with st.expander("Preview Deck Structure"):
+        st.markdown(f"**{book_name}**")
+        for ch in (st.session_state.chapters or []):
+            ch_num = ch['chapter_number']
+            ch_title = ch.get('title', f'Chapter {ch_num}')
+            ch_key = f"ch{ch_num}"
+            ch_count = len([q for q in st.session_state.questions.get(ch_key, [])
+                           if not q.get('is_context_only')])
+            if ch_count > 0:
+                st.markdown(f"  - {ch_num}. {ch_title} ({ch_count} cards)")
+
+    # Export button
     if st.button("Export to Anki Deck", type="primary"):
-        st.warning("Anki export functionality coming soon!")
-        st.markdown("""
-        **Planned features:**
-        - Generate .apkg file for direct Anki import
-        - Include question, choices, correct answer, and explanation
-        - Tag cards by chapter
-        - Optional: include associated images
-        """)
+        if not book_name.strip():
+            st.error("Please enter a book name")
+            return
+
+        with st.spinner("Generating Anki deck..."):
+            try:
+                output_path = generate_anki_deck(
+                    book_name=book_name.strip(),
+                    questions=st.session_state.questions,
+                    chapters=st.session_state.chapters or [],
+                    image_assignments=st.session_state.image_assignments,
+                    images=st.session_state.images,
+                    include_images=include_images,
+                    only_approved=only_approved,
+                    qc_progress=st.session_state.qc_progress
+                )
+
+                st.success(f"Deck exported successfully!")
+                st.info(f"Saved to: `{output_path}`")
+
+                # Provide download button
+                with open(output_path, 'rb') as f:
+                    st.download_button(
+                        label="Download .apkg file",
+                        data=f,
+                        file_name=os.path.basename(output_path),
+                        mime="application/octet-stream"
+                    )
+
+            except Exception as e:
+                st.error(f"Export failed: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+
+
+# =============================================================================
+# Step 7: Edit Prompts
+# =============================================================================
+
+def render_prompts_step():
+    """Render prompt editor step."""
+    st.header("Step 7: Edit Prompts")
+
+    st.caption("Edit the LLM prompts used for extraction. Changes are saved to `scripts/config/prompts.yaml`.")
+
+    prompts = load_prompts()
+
+    # Create tabs for each prompt
+    prompt_names = list(prompts.keys())
+    tabs = st.tabs([prompts[name].get("description", name) for name in prompt_names])
+
+    for i, prompt_name in enumerate(prompt_names):
+        with tabs[i]:
+            prompt_data = prompts[prompt_name]
+            description = prompt_data.get("description", "")
+            current_prompt = prompt_data.get("prompt", "")
+
+            st.markdown(f"**Prompt name:** `{prompt_name}`")
+            st.caption(description)
+
+            # Text area for editing
+            new_prompt = st.text_area(
+                "Prompt template",
+                value=current_prompt,
+                height=400,
+                key=f"prompt_editor_{prompt_name}",
+                help="Use {variable_name} syntax for variables that get filled in at runtime"
+            )
+
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                if st.button("Save", key=f"save_{prompt_name}", type="primary"):
+                    prompts[prompt_name]["prompt"] = new_prompt
+                    save_prompts(prompts)
+                    st.success(f"Saved {prompt_name}!")
+            with col2:
+                if st.button("Reset to saved", key=f"reset_{prompt_name}"):
+                    reload_prompts()
+                    st.rerun()
+
+    st.markdown("---")
+    st.subheader("Tips")
+    st.markdown("""
+    - **Variables**: Use `{variable_name}` syntax. Available variables depend on the prompt:
+      - `identify_chapters`: `{page_index}`
+      - `extract_qa_pairs`: `{chapter_num}`, `{chapter_text}`
+      - `match_images_to_questions`: `{chapter_num}`, `{questions_text}`, `{images_text}`
+      - `associate_context`: `{questions_summary}`
+    - **JSON output**: Most prompts expect JSON output. Keep the output format instructions.
+    - **Testing**: After editing, re-run the relevant extraction step to test your changes.
+    """)

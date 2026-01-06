@@ -25,7 +25,8 @@ from ui_components import (
     render_questions_step,
     render_context_step,
     render_qc_step,
-    render_export_step
+    render_export_step,
+    render_prompts_step
 )
 
 # Page config
@@ -69,6 +70,8 @@ def main():
         render_qc_step()
     elif step == "export":
         render_export_step()
+    elif step == "prompts":
+        render_prompts_step()
 
 
 if __name__ == "__main__":

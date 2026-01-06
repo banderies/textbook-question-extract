@@ -73,6 +73,17 @@ def reload_prompts():
     return load_prompts()
 
 
+def save_prompts(prompts: dict):
+    """Save prompts to YAML file and update cache."""
+    global _cached_prompts
+    prompts_path = get_prompts_path()
+
+    with open(prompts_path, 'w') as f:
+        yaml.dump(prompts, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    _cached_prompts = prompts
+
+
 # =============================================================================
 # Anthropic Client & Model Management
 # =============================================================================
@@ -84,8 +95,8 @@ FALLBACK_MODELS = {
     "claude-3-5-sonnet-20241022": "Claude Sonnet 3.5",
     "claude-3-5-haiku-20241022": "Claude Haiku 3.5",
 }
-DEFAULT_MODEL_ID = "claude-sonnet-4-20250514"
-DEFAULT_MODEL_NAME = "Claude Sonnet 4"
+DEFAULT_MODEL_ID = "claude-3-5-haiku-20241022"
+DEFAULT_MODEL_NAME = "Claude Haiku 3.5"
 
 _cached_models = None
 
