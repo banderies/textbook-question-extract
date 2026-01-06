@@ -1744,10 +1744,9 @@ def render_context_step():
 
     # Associate Context button
     if st.button("🔗 Associate Context", type="primary"):
-        try:
-            client = anthropic.Anthropic()
-        except Exception as e:
-            st.error(f"Failed to initialize API client: {e}")
+        client = get_anthropic_client()
+        if not client:
+            st.error("ANTHROPIC_API_KEY not set. Please set the environment variable.")
             return
 
         with st.spinner("Analyzing questions and associating context..."):
