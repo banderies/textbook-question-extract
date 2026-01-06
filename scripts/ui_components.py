@@ -1011,15 +1011,10 @@ def render_qc_step():
                     for img in assigned_images:
                         filepath = img["filepath"]
                         if os.path.exists(filepath):
-                            st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_container_width=True)
+                            st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_column_width=True)
 
-                            img_col1, img_col2 = st.columns(2)
-                            with img_col1:
-                                if st.button("Image Correct", key=f"img_ok_{img['filename']}", type="primary"):
-                                    st.success("Image confirmed!")
-                            with img_col2:
-                                st.button("Remove Image", key=f"img_remove_{img['filename']}",
-                                         on_click=remove_image, args=(img["filename"],))
+                            st.button("Remove Image", key=f"img_remove_{img['filename']}",
+                                     on_click=remove_image, args=(img["filename"],))
                         else:
                             st.warning(f"Image not found: {filepath}")
 
