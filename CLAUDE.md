@@ -8,36 +8,62 @@ Textbook Question Extractor - A Python pipeline for extracting Q&A pairs from PD
 
 ## Architecture
 
-### Three-Phase Pipeline
+### Six-Step Pipeline
 
 ```
 PDF Input
     ↓
-PHASE 1: PREPROCESSING
+STEP 1: SELECT SOURCE
+├── Load PDF from source/ directory
 ├── PyMuPDF: Extract text pages and images with positions
-├── Chapter detection: LLM identifies chapter boundaries
 ├── Flanking text: Extract context before/after each image
-└── Output: images/*.jpg + output/images.json
+└── Output: images/*.jpg + output/<textbook>/images.json + pages.json
     ↓
-PHASE 2: EXTRACTION & MATCHING
-├── Claude API: Extract Q&A pairs per chapter
+STEP 2: EXTRACT CHAPTERS
+├── LLM identifies chapter boundaries from page index
+└── Output: chapters.json + chapter_text.json
+    ↓
+STEP 3: EXTRACT QUESTIONS
+├── Claude API: Extract Q&A pairs per chapter (parallel processing)
 ├── Image matching: Use flanking text to assign images to questions
-├── Cross-page context: Images at page boundaries get context from adjacent pages
-└── Output: output/questions_by_chapter.json + output/image_assignments.json
+└── Output: questions_by_chapter.json + image_assignments.json
     ↓
-PHASE 3: QC & EXPORT
+STEP 4: ASSOCIATE CONTEXT
+├── LLM identifies context-only questions (clinical scenarios without choices)
+├── Merges context text into sub-questions (e.g., Q1 context → Q1a, Q1b, Q1c)
+├── Sub-questions inherit images via context_from field
+└── Output: questions_merged.json + image_assignments_merged.json
+    ↓
+STEP 5: QC QUESTIONS
 ├── Streamlit GUI: Review/correct assignments
-├── QC progress tracking: Approve/flag questions
+├── Approve/flag questions, reassign images
+└── Output: qc_progress.json
+    ↓
+STEP 6: EXPORT
 └── Output: .apkg file (importable to Anki)
 ```
 
-### Key Scripts
+### Modular Code Structure
 
-| Script | Purpose |
+```
+scripts/
+├── review_gui.py          # Main entry point - initializes app and routes to steps
+├── ui_components.py       # All Streamlit UI rendering functions
+├── state_management.py    # Session state, file I/O, path management
+├── llm_extraction.py      # LLM functions, prompt loading, model management
+├── pdf_extraction.py      # PDF text/image extraction, chapter assignment
+└── config/
+    └── prompts.yaml       # Editable LLM prompts (no code changes needed)
+```
+
+| Module | Purpose |
 |--------|---------|
-| `review_gui.py` | Main Streamlit GUI - handles all extraction steps |
-| `image_pipeline.py` | Extract images from PDF with positional metadata |
-| `agentic_qa_extractor.py` | Standalone Q&A extraction using Claude |
+| `review_gui.py` | Entry point, session init, step routing |
+| `ui_components.py` | Render functions for each step, image callbacks, sidebar |
+| `state_management.py` | `st.session_state` management, JSON save/load, paths |
+| `llm_extraction.py` | Claude API calls, prompt loading from YAML, model fetching |
+| `pdf_extraction.py` | PyMuPDF extraction, flanking text, chapter assignment |
+| `config/prompts.yaml` | All LLM prompts - edit to customize extraction behavior |
 
 ## Commands
 
@@ -55,22 +81,32 @@ streamlit run scripts/review_gui.py
 
 ## Data Files
 
-All state is persisted to JSON files in `output/`:
+All state is persisted to JSON files in `output/<textbook_name>/`:
 
 | File | Contents |
 |------|----------|
+| `pages.json` | Raw extracted text per page |
 | `chapters.json` | Detected chapters with page ranges |
 | `chapter_text.json` | Extracted text per chapter |
-| `questions_by_chapter.json` | Extracted Q&A pairs |
 | `images.json` | Image metadata with flanking text context |
-| `image_assignments.json` | Image filename → question ID mapping |
+| `questions_by_chapter.json` | Extracted Q&A pairs (pre-merge) |
+| `image_assignments.json` | Image filename → question ID mapping (pre-merge) |
+| `questions_merged.json` | Questions with context merged into sub-questions |
+| `image_assignments_merged.json` | Image assignments after context association |
 | `qc_progress.json` | QC review status per question |
-| `settings.json` | UI state (model, step, QC position) |
+| `settings.json` | UI state (selected model, current step, QC position) |
 
 ## Key Design Patterns
 
+### Editable Prompts (config/prompts.yaml)
+All LLM prompts are stored in YAML for easy editing without code changes:
+- `identify_chapters` - Find chapter boundaries
+- `extract_qa_pairs` - Extract questions and answers
+- `match_images_to_questions` - Assign images using flanking text
+- `associate_context` - Link context questions to sub-questions
+
 ### Dynamic Model Selection
-- Models fetched from Anthropic API via `GET /v1/models`
+- Models fetched from Anthropic API via `client.models.list()`
 - Cached after first fetch, falls back to static list if API unavailable
 - User can select model per extraction step
 
@@ -79,6 +115,13 @@ Images are matched to questions using surrounding text context:
 1. Extract 500 chars before and after each image
 2. Cross-page boundaries: images at top of page get context from previous page
 3. LLM prompt: "Find the LAST question number in text BEFORE image"
+4. Multiple images can belong to the same question
+
+### Context Inheritance
+For multi-part questions (Q1 → Q1a, Q1b, Q1c):
+- Context question (Q1) has `is_context_only: true`
+- Sub-questions have `context_from: "ch1_1"` and `context_merged: true`
+- Images stay assigned to context question; sub-questions inherit via `context_from`
 
 ### Chapter-Aware Processing
 Question numbering restarts each chapter, so IDs are prefixed: `2a` becomes `ch1_2a` or `ch8_2a`.
@@ -106,8 +149,9 @@ A. ...
 Question 5b text? 5b
 A. ...
 ```
-- Sub-questions share parent context and image
-- Stored with `shared_context` and `image_group` fields
+- Context question (5) marked as `is_context_only`
+- Sub-questions (5a, 5b) have `context_from` pointing to parent
+- Images inherited through `context_from` lookup
 
 ## API Usage
 
@@ -115,9 +159,10 @@ A. ...
 # Models are fetched dynamically
 response = client.models.list(limit=100)
 
-# Q&A extraction
+# Q&A extraction (prompts loaded from YAML)
+prompt = get_prompt("extract_qa_pairs", chapter_num=1, chapter_text=text)
 response = client.messages.create(
-    model=get_selected_model_id(),  # User-selected model
+    model=get_model_id(selected_model),
     max_tokens=16000,
     messages=[{"role": "user", "content": prompt}]
 )
@@ -131,3 +176,4 @@ response = client.messages.create(
 - `streamlit` - Interactive GUI
 - `genanki` - Anki deck generation
 - `python-dotenv` - Environment variable loading
+- `pyyaml` - Prompt configuration loading
