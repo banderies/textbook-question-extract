@@ -1725,20 +1725,109 @@ def render_context_step():
     # Show current merged state
     merged_count = sum(len(qs) for qs in st.session_state.questions_merged.values())
     if merged_count > 0:
-        st.success(f"Context already associated. {merged_count} merged questions saved.")
-        if st.button("View Merged Questions Preview"):
-            st.subheader("Merged Questions Preview")
-            for ch_key in sorted(st.session_state.questions_merged.keys()):
-                with st.expander(f"Chapter {ch_key}", expanded=False):
-                    for q in st.session_state.questions_merged[ch_key]:
-                        is_context = q.get("is_context_only", False)
-                        has_merged = q.get("context_merged", False)
-                        status = "🔵 Context-only (excluded)" if is_context else ("🟢 Has merged context" if has_merged else "⚪ Regular")
-                        st.markdown(f"**{q['full_id']}** {status}")
-                        if has_merged:
-                            st.caption(f"Context from: {q.get('context_from', 'N/A')}")
-                        st.text(q.get("text", "")[:200] + "..." if len(q.get("text", "")) > 200 else q.get("text", ""))
-                        st.markdown("---")
+        # Count context-only in merged
+        context_only_merged = sum(
+            1 for qs in st.session_state.questions_merged.values()
+            for q in qs if q.get("is_context_only")
+        )
+        actual_cards = merged_count - context_only_merged
+
+        st.success(f"Context already associated. {actual_cards} card-ready questions" +
+                  (f" + {context_only_merged} context-only" if context_only_merged > 0 else "") +
+                  " saved.")
+
+        # Filter controls
+        filter_col1, filter_col2 = st.columns([1, 2])
+        with filter_col1:
+            hide_context_only = st.checkbox("Hide context-only entries", value=True, key="context_hide_ctx")
+        with filter_col2:
+            chapter_filter = st.selectbox(
+                "Filter by chapter:",
+                ["All chapters"] + list(st.session_state.questions_merged.keys()),
+                key="context_chapter_filter"
+            )
+
+        st.subheader("Merged Questions Preview")
+
+        # Use merged image assignments if available
+        assignments_to_use = st.session_state.image_assignments_merged if st.session_state.image_assignments_merged else st.session_state.image_assignments
+
+        # Collect all questions to display
+        all_merged_questions = []
+        for ch_key in sorted(st.session_state.questions_merged.keys()):
+            if chapter_filter != "All chapters" and ch_key != chapter_filter:
+                continue
+            for q in st.session_state.questions_merged[ch_key]:
+                if hide_context_only and q.get("is_context_only"):
+                    continue
+                all_merged_questions.append((ch_key, q))
+
+        st.caption(f"Showing {len(all_merged_questions)} questions")
+
+        # Display questions with expanders (flat, no nesting)
+        current_chapter = None
+        for ch_key, q in all_merged_questions:
+            # Show chapter header when chapter changes
+            if ch_key != current_chapter:
+                current_chapter = ch_key
+                questions_in_ch = st.session_state.questions_merged[ch_key]
+                ch_context_only = sum(1 for qx in questions_in_ch if qx.get("is_context_only"))
+                ch_actual = len(questions_in_ch) - ch_context_only
+                st.markdown(f"### Chapter {ch_key} ({ch_actual} questions" +
+                           (f" + {ch_context_only} context-only" if ch_context_only > 0 else "") + ")")
+
+            # Get images for this question from merged assignments
+            q_images = [img for img in st.session_state.images
+                       if assignments_to_use.get(img["filename"]) == q["full_id"]]
+
+            # Build status indicators (same format as Extract Questions)
+            indicators = []
+
+            if q.get("is_context_only"):
+                indicators.append("[CTX-ONLY]")
+            elif q.get("context_merged"):
+                indicators.append("[+CTX]")
+
+            if q_images:
+                indicators.append(f"[{len(q_images)} img]")
+            elif q.get("has_image"):
+                indicators.append("[needs img]")
+
+            indicator_str = " ".join(indicators)
+            if indicator_str:
+                indicator_str = " " + indicator_str
+
+            # Truncate text for display
+            display_text = q['text'][:70] + "..." if len(q['text']) > 70 else q['text']
+
+            with st.expander(f"Q{q['local_id']}{indicator_str}: {display_text}"):
+                col1, col2 = st.columns([2, 1])
+
+                with col1:
+                    # Show context-only warning
+                    if q.get("is_context_only"):
+                        st.warning("**CONTEXT ONLY** - This provides context for sub-questions and will NOT become an Anki card")
+
+                    # Show merged context indicator
+                    if q.get("context_merged"):
+                        st.success(f"Context merged from Q{q.get('context_from', '?').split('_')[-1]}")
+
+                    st.markdown(f"**Question:** {q['text']}")
+
+                    if q.get("choices"):
+                        st.markdown("**Choices:**")
+                        for letter, choice in q.get("choices", {}).items():
+                            st.markdown(f"- {letter}: {choice}")
+                        st.markdown(f"**Correct Answer:** {q.get('correct_answer', 'N/A')}")
+                        st.markdown(f"**Explanation:** {q.get('explanation', 'N/A')}")
+
+                with col2:
+                    if q_images:
+                        for img in q_images:
+                            if os.path.exists(img["filepath"]):
+                                st.image(img["filepath"], caption=f"Page {img['page']}", width=200)
+                    elif q.get("has_image"):
+                        st.warning("Needs image assignment")
 
     st.markdown("---")
 
@@ -1802,21 +1891,56 @@ def render_context_step():
 
                     st.rerun()
 
-    # Option to clear merged data
+    # Options to manage merged data
     if merged_count > 0:
         st.markdown("---")
-        if st.button("🗑️ Clear Merged Data", type="secondary"):
-            st.session_state.questions_merged = {}
-            st.session_state.image_assignments_merged = {}
-            # Delete files if they exist
-            merged_file = get_questions_merged_file()
-            assignments_merged_file = get_image_assignments_merged_file()
-            if os.path.exists(merged_file):
-                os.remove(merged_file)
-            if os.path.exists(assignments_merged_file):
-                os.remove(assignments_merged_file)
-            st.success("Merged data cleared. Original questions remain intact.")
-            st.rerun()
+        st.subheader("Manage Merged Data")
+
+        btn_col1, btn_col2 = st.columns(2)
+
+        with btn_col1:
+            # Count context-only questions
+            context_only_ids = []
+            for ch_key, ch_questions in st.session_state.questions_merged.items():
+                for q in ch_questions:
+                    if q.get("is_context_only"):
+                        context_only_ids.append(q["full_id"])
+
+            if context_only_ids:
+                if st.button(f"🧹 Remove {len(context_only_ids)} Context-Only Questions", type="primary"):
+                    # Remove context-only questions from merged data
+                    for ch_key in st.session_state.questions_merged:
+                        st.session_state.questions_merged[ch_key] = [
+                            q for q in st.session_state.questions_merged[ch_key]
+                            if not q.get("is_context_only")
+                        ]
+                    # Remove image assignments for context-only questions
+                    if st.session_state.image_assignments_merged:
+                        st.session_state.image_assignments_merged = {
+                            img: q_id for img, q_id in st.session_state.image_assignments_merged.items()
+                            if q_id not in context_only_ids
+                        }
+                    # Save updated data
+                    save_questions_merged()
+                    save_image_assignments_merged()
+                    st.success(f"Removed {len(context_only_ids)} context-only entries. Only card-ready questions remain.")
+                    st.rerun()
+            else:
+                st.info("No context-only questions to remove.")
+
+        with btn_col2:
+            if st.button("🗑️ Clear All Merged Data", type="secondary"):
+                st.session_state.questions_merged = {}
+                st.session_state.image_assignments_merged = {}
+                # Delete files if they exist
+                merged_file = get_questions_merged_file()
+                assignments_merged_file = get_image_assignments_merged_file()
+                if os.path.exists(merged_file):
+                    os.remove(merged_file)
+                if os.path.exists(assignments_merged_file):
+                    os.remove(assignments_merged_file)
+                st.success("Merged data cleared. Original questions remain intact.")
+                st.rerun()
 
 
 def render_qc_step():
