@@ -1,0 +1,184 @@
+# LLM Prompts for Textbook Q&A Extractor
+# Edit these prompts to customize extraction behavior
+# Variables use {variable_name} syntax and are filled in at runtime
+
+identify_chapters:
+  description: "Identify chapter boundaries from PDF page index"
+  prompt: |
+    Analyze this textbook page index and identify all chapters that contain QUESTIONS sections.
+
+    This is a medical textbook where each chapter has:
+    - A chapter header (e.g., "Chapter 1: Title" or "1 Title")
+    - A QUESTIONS section with numbered questions
+    - An ANSWERS section with explanations
+
+    For each chapter with questions, provide:
+    - chapter_number: The chapter number (integer)
+    - title: The chapter title
+    - start_page: The page number where the chapter starts (from the [PAGE X] markers)
+    - has_questions: true (only include chapters that have questions)
+
+    Look for patterns like "QUESTIONS" or numbered questions (1., 2., etc.) to identify which chapters have Q&A content.
+
+    Return ONLY a JSON array, no other text:
+    [
+      {{"chapter_number": 1, "title": "Chapter Title", "start_page": 14, "has_questions": true}},
+      ...
+    ]
+
+    PAGE INDEX:
+    {page_index}
+
+extract_qa_pairs:
+  description: "Extract Q&A pairs from a single chapter"
+  prompt: |
+    You are analyzing Chapter {chapter_num} of a medical textbook to extract all questions and their corresponding answers.
+
+    TASK:
+    1. Find all questions in the QUESTIONS section
+    2. Find all answers in the ANSWERS section
+    3. Match each question to its answer
+    4. Identify the correct answer choice (A, B, C, D, or E)
+
+    IMPORTANT - MULTI-PART QUESTIONS:
+    Some questions follow a multi-part format:
+    - A "context question" (e.g., "1") contains a clinical scenario/case and possibly an image, but NO answer choices
+    - Sub-questions (e.g., "1a", "1b", "1c") contain the actual questions WITH answer choices
+
+    You MUST extract BOTH:
+    1. The context question (e.g., "1") - extract it with empty choices {{}}, empty correct_answer "", and empty explanation ""
+    2. All sub-questions (e.g., "1a", "1b", "1c") - extract normally with their choices, answers, and explanations
+
+    Do NOT skip context questions just because they have no answer choices. Extract them as-is.
+
+    ADDITIONAL RULES:
+    - Questions may have sub-parts like 2a, 2b, 2c - treat each as a separate question
+    - Question IDs should match exactly as they appear (e.g., "1", "1a", "1b", "2a", "2b", "3")
+    - For images: If a question references an image (e.g., "image below", "figure", "radiograph shown"), mark has_image: true
+    - Use image_group to indicate which questions share the same image (e.g., "1" for questions 1, 1a, 1b, 1c sharing one image)
+    - Extract the full question text and all answer choices (if present)
+
+    Return ONLY a JSON object in this exact format:
+    {{
+      "chapter": {chapter_num},
+      "questions": [
+        {{
+          "id": "1",
+          "text": "Clinical scenario/context text here (no answer choices)",
+          "choices": {{}},
+          "has_image": true,
+          "image_group": "1",
+          "correct_answer": "",
+          "explanation": ""
+        }},
+        {{
+          "id": "1a",
+          "text": "First sub-question text",
+          "choices": {{
+            "A": "Choice A text",
+            "B": "Choice B text",
+            "C": "Choice C text",
+            "D": "Choice D text"
+          }},
+          "has_image": false,
+          "image_group": "1",
+          "correct_answer": "B",
+          "explanation": "Brief explanation from the answer section"
+        }}
+      ]
+    }}
+
+    CHAPTER TEXT:
+    {chapter_text}
+
+match_images_to_questions:
+  description: "Match images to questions based on flanking text context"
+  prompt: |
+    Match images to questions for Chapter {chapter_num}.
+
+    TEXTBOOK STRUCTURE (critical for correct matching):
+    In this textbook, each question appears in this order:
+    1. Question text ending with the question number (e.g., "...needle placement? 2a")
+    2. IMAGE (if the question has one)
+    3. Answer choices (A, B, C, D)
+    4. Next question...
+
+    Therefore: The question number at the END of "Text BEFORE image" tells you which question the image belongs to.
+
+    QUESTIONS:
+    {questions_text}
+
+    IMAGES (with surrounding text context):
+    {images_text}
+
+    MATCHING RULES:
+    1. Find the LAST question number mentioned in "Text BEFORE image" - that's the question this image belongs to
+    2. Example: If text before ends with "...rotator interval approach? 2a" -> image belongs to ch{chapter_num}_2a
+    3. Example: If text before ends with "...mixture for the arthrogram? 2b" -> image belongs to ch{chapter_num}_2b
+    4. The text AFTER typically shows the answer choices, then the NEXT question
+    5. Each question has its OWN image - do NOT share images across questions
+    6. Decorative images or images not matching any question -> assign to "(none)"
+
+    Return ONLY a JSON object mapping image filenames to question IDs:
+    {{
+      "image_filename.jpeg": "ch{chapter_num}_2a",
+      "another_image.jpeg": "(none)"
+    }}
+
+postprocess_questions:
+  description: "Link context questions to their sub-questions"
+  prompt: |
+    Analyze this list of extracted questions and identify context relationships.
+
+    TASK:
+    1. Identify "context-only" entries - these have descriptive text but NO answer choices (empty choices dict)
+    2. For each context-only entry, find its related sub-questions by matching the image_group
+    3. Return the updated questions with context properly linked
+
+    RULES:
+    - A question is "context-only" if it has no choices (choices is empty {{}}) AND its ID is just a number (e.g., "5") not a letter suffix (e.g., "5a")
+    - Sub-questions share the same image_group as their context question
+    - Example: If question "5" has image_group="5" and no choices, and questions "5a", "5b", "5c" also have image_group="5", then 5a/5b/5c are sub-questions of context "5"
+
+    FOR EACH QUESTION, add these fields:
+    - "is_context_only": true/false - true if this is just context (no choices, no correct answer)
+    - "context": "" - for sub-questions, copy the context question's text here. Leave empty for standalone questions.
+    - "context_question_id": "" - for sub-questions, the local_id of their context question (e.g., "5"). Leave empty otherwise.
+
+    QUESTIONS TO PROCESS:
+    {questions_json}
+
+    Return ONLY the updated JSON array with all original fields preserved plus the new fields added.
+
+associate_context:
+  description: "Identify context relationships and merge context into sub-questions"
+  prompt: |
+    Analyze these questions from a medical textbook and identify CONTEXT relationships.
+
+    CONTEXT PATTERN:
+    Some questions follow this pattern:
+    - A "context question" (e.g., ID "1") contains a clinical scenario but NO answer choices
+    - Sub-questions (e.g., "1a", "1b", "1c") contain the actual questions WITH answer choices
+    - The sub-questions all relate to the context question
+
+    YOUR TASK:
+    1. Identify which questions are "context-only" (have text but NO answer choices)
+    2. For each context question, identify which sub-questions belong to it
+    3. Sub-questions typically share the same base number (1a, 1b, 1c all belong to context 1)
+
+    QUESTIONS:
+    {questions_summary}
+
+    Return a JSON object with this structure:
+    {{
+      "context_mappings": [
+        {{
+          "context_id": "ch1_1",
+          "sub_question_ids": ["ch1_1a", "ch1_1b", "ch1_1c"]
+        }}
+      ]
+    }}
+
+    If there are no context relationships, return: {{"context_mappings": []}}
+
+    Return ONLY the JSON, no other text.
