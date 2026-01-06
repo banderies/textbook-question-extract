@@ -434,10 +434,13 @@ def associate_context_llm(client, questions: dict, image_assignments: dict,
                 context_q["is_context_only"] = True
                 stats["context_questions_found"] += 1
 
+                # Count context images (they stay assigned to context question,
+                # sub-questions inherit them via context_from field)
                 context_images = [
                     img_file for img_file, assigned_to in image_assignments.items()
                     if assigned_to == context_id
                 ]
+                stats["images_copied"] += len(context_images)
 
                 for sub_id in sub_ids:
                     if sub_id not in question_by_id:
@@ -454,10 +457,8 @@ def associate_context_llm(client, questions: dict, image_assignments: dict,
                     sub_q["context_from"] = context_id
                     sub_q["is_context_only"] = False
                     stats["sub_questions_updated"] += 1
-
-                    for img_file in context_images:
-                        updated_assignments[img_file] = sub_id
-                        stats["images_copied"] += 1
+                    # Images stay assigned to context question - sub-questions
+                    # inherit them via context_from lookup in display code
 
         except Exception as e:
             print(f"LLM context association failed for {ch_key}: {e}")

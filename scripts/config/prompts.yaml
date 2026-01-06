@@ -99,7 +99,7 @@ match_images_to_questions:
     TEXTBOOK STRUCTURE (critical for correct matching):
     In this textbook, each question appears in this order:
     1. Question text ending with the question number (e.g., "...needle placement? 2a")
-    2. IMAGE (if the question has one)
+    2. IMAGE(S) - one OR MORE images may appear here
     3. Answer choices (A, B, C, D)
     4. Next question...
 
@@ -116,12 +116,15 @@ match_images_to_questions:
     2. Example: If text before ends with "...rotator interval approach? 2a" -> image belongs to ch{chapter_num}_2a
     3. Example: If text before ends with "...mixture for the arthrogram? 2b" -> image belongs to ch{chapter_num}_2b
     4. The text AFTER typically shows the answer choices, then the NEXT question
-    5. Each question has its OWN image - do NOT share images across questions
-    6. Decorative images or images not matching any question -> assign to "(none)"
+    5. MULTIPLE IMAGES CAN BELONG TO THE SAME QUESTION - if two or more images have the same question number in their "Text BEFORE", assign ALL of them to that question
+    6. Example: If two images both have text before ending with "...image of the foot? 40" -> BOTH images belong to ch{chapter_num}_40
+    7. Do NOT share a single image across multiple different questions
+    8. Decorative images or images not matching any question -> assign to "(none)"
 
     Return ONLY a JSON object mapping image filenames to question IDs:
     {{
-      "image_filename.jpeg": "ch{chapter_num}_2a",
+      "image1.jpeg": "ch{chapter_num}_40",
+      "image2.jpeg": "ch{chapter_num}_40",
       "another_image.jpeg": "(none)"
     }}
 

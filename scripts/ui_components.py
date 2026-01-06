@@ -9,6 +9,7 @@ import re
 import copy
 from pathlib import Path
 from datetime import datetime
+from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import streamlit as st
@@ -50,7 +51,7 @@ def question_sort_key(q_id: str) -> tuple:
 
 def get_images_for_question(q_id: str) -> list[dict]:
     """
-    Get all images for a question, including shared images from image_group.
+    Get all images for a question, including inherited images from context_from or image_group.
     """
     images = []
     directly_assigned = set()
@@ -65,14 +66,29 @@ def get_images_for_question(q_id: str) -> list[dict]:
     if images:
         return images
 
-    # Check for image_group inheritance
+    # Check for inherited images (context_from or image_group)
+    # First check merged questions, then regular questions
+    questions_to_check = []
+    for ch_key, qs in st.session_state.questions_merged.items():
+        questions_to_check.extend(qs)
     for ch_key, qs in st.session_state.questions.items():
-        for q in qs:
-            if q["full_id"] == q_id:
-                image_group = q.get("image_group")
-                if not image_group:
+        questions_to_check.extend(qs)
+
+    for q in questions_to_check:
+        if q["full_id"] == q_id:
+            # Check context_from first (for merged context)
+            context_from = q.get("context_from")
+            if context_from:
+                for img in st.session_state.images:
+                    assigned_to = st.session_state.image_assignments.get(img["filename"])
+                    if assigned_to == context_from and img["filename"] not in directly_assigned:
+                        images.append(img)
+                if images:
                     return images
 
+            # Check image_group (for shared images within a group)
+            image_group = q.get("image_group")
+            if image_group:
                 ch_prefix = q_id.split("_")[0]
                 base_id = f"{ch_prefix}_{image_group}"
 
@@ -81,7 +97,7 @@ def get_images_for_question(q_id: str) -> list[dict]:
                     if assigned_to == base_id and img["filename"] not in directly_assigned:
                         images.append(img)
 
-                return images
+            return images
 
     return images
 
@@ -125,18 +141,12 @@ def render_sidebar():
 
     st.sidebar.markdown("---")
 
-    # Status summary
+    # Status summary - Order: Chapters, Images, Questions, Context, QC
     st.sidebar.subheader("Status")
     if st.session_state.chapters:
         st.sidebar.success(f"Chapters: {len(st.session_state.chapters)}")
     else:
         st.sidebar.info("Chapters: Not extracted")
-
-    q_count = sum(len(qs) for qs in st.session_state.questions.values())
-    if q_count > 0:
-        st.sidebar.success(f"Questions: {q_count}")
-    else:
-        st.sidebar.info("Questions: Not extracted")
 
     img_count = len(st.session_state.images)
     if img_count > 0:
@@ -144,6 +154,12 @@ def render_sidebar():
         st.sidebar.success(f"Images: {img_count} ({assigned} assigned)")
     else:
         st.sidebar.info("Images: Not extracted")
+
+    q_count = sum(len(qs) for qs in st.session_state.questions.values())
+    if q_count > 0:
+        st.sidebar.success(f"Questions: {q_count}")
+    else:
+        st.sidebar.info("Questions: Not extracted")
 
     merged_count = sum(len(qs) for qs in st.session_state.questions_merged.values())
     if merged_count > 0:
@@ -154,21 +170,6 @@ def render_sidebar():
     reviewed = len(st.session_state.qc_progress.get("reviewed", {}))
     if reviewed > 0:
         st.sidebar.success(f"QC'd: {reviewed}/{q_count}")
-
-    # Model selection
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Model Settings")
-    model_options = get_model_options()
-    current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
-    selected = st.sidebar.selectbox(
-        "Claude Model:",
-        model_options,
-        index=current_idx,
-        key="model_selector"
-    )
-    if selected != st.session_state.selected_model:
-        st.session_state.selected_model = selected
-        save_settings()
 
 
 # =============================================================================
@@ -634,8 +635,15 @@ def render_context_step():
                 st.markdown(f"### Chapter {ch_key} ({ch_actual} questions" +
                            (f" + {ch_context_only} context-only" if ch_context_only > 0 else "") + ")")
 
+            # Get images - check direct assignment first, then inherited from context
             q_images = [img for img in st.session_state.images
                        if assignments_to_use.get(img["filename"]) == q["full_id"]]
+
+            # If no direct images and has context_from, inherit images from context question
+            if not q_images and q.get("context_from"):
+                context_id = q.get("context_from")
+                q_images = [img for img in st.session_state.images
+                           if assignments_to_use.get(img["filename"]) == context_id]
 
             indicators = []
 
@@ -701,44 +709,44 @@ def render_context_step():
             if not client:
                 st.error("ANTHROPIC_API_KEY not set. Please set the environment variable.")
             else:
-                with st.spinner("Analyzing questions and associating context..."):
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
+                progress_bar = st.progress(0)
+                status_text = st.empty()
 
-                    status_text.text(f"Using {st.session_state.selected_model} for context analysis...")
-                    progress_bar.progress(20)
+                total_chapters = len(st.session_state.questions)
+                status_text.text(f"Processing {total_chapters} chapters...")
 
-                    questions_copy = copy.deepcopy(st.session_state.questions)
-                    assignments_copy = copy.deepcopy(st.session_state.image_assignments)
+                questions_copy = copy.deepcopy(st.session_state.questions)
+                assignments_copy = copy.deepcopy(st.session_state.image_assignments)
 
-                    model_id = get_model_id(st.session_state.selected_model)
+                model_id = get_model_id(st.session_state.selected_model)
+                progress_bar.progress(0.1)
 
-                    updated_questions, updated_assignments, stats = associate_context_llm(
-                        client,
-                        questions_copy,
-                        assignments_copy,
-                        model_id=model_id
-                    )
+                updated_questions, updated_assignments, stats = associate_context_llm(
+                    client,
+                    questions_copy,
+                    assignments_copy,
+                    model_id=model_id
+                )
 
-                    progress_bar.progress(80)
-                    status_text.text("Saving merged data...")
+                progress_bar.progress(0.8)
+                status_text.text("Saving merged data...")
 
-                    st.session_state.questions_merged = updated_questions
-                    st.session_state.image_assignments_merged = updated_assignments
-                    save_questions_merged()
-                    save_image_assignments_merged()
+                st.session_state.questions_merged = updated_questions
+                st.session_state.image_assignments_merged = updated_assignments
+                save_questions_merged()
+                save_image_assignments_merged()
 
-                    progress_bar.progress(100)
-                    status_text.text("Done!")
+                progress_bar.progress(1.0)
+                status_text.text("Done!")
 
-                    st.success(
-                        f"Context association complete!\n\n"
-                        f"- Context questions found: {stats['context_questions_found']}\n"
-                        f"- Sub-questions updated: {stats['sub_questions_updated']}\n"
-                        f"- Images copied: {stats['images_copied']}"
-                    )
+                st.success(
+                    f"Context association complete!\n\n"
+                    f"- Context questions found: {stats['context_questions_found']}\n"
+                    f"- Sub-questions updated: {stats['sub_questions_updated']}\n"
+                    f"- Images copied: {stats['images_copied']}"
+                )
 
-                    st.rerun()
+                st.rerun()
 
     if merged_count > 0:
         st.markdown("---")
@@ -979,6 +987,25 @@ def render_qc_step():
                     if c["chapter_number"] == ch_num and i + 1 < len(st.session_state.chapters):
                         ch_end = st.session_state.chapters[i + 1]["start_page"]
 
+                # Define callback functions for image operations
+                def remove_image(img_filename):
+                    st.session_state.image_assignments.pop(img_filename, None)
+                    save_image_assignments()
+                    if st.session_state.image_assignments_merged:
+                        st.session_state.image_assignments_merged.pop(img_filename, None)
+                        save_image_assignments_merged()
+                    if "qc_question_selector" in st.session_state:
+                        del st.session_state.qc_question_selector
+
+                def assign_image(img_filename, question_id):
+                    st.session_state.image_assignments[img_filename] = question_id
+                    save_image_assignments()
+                    if st.session_state.image_assignments_merged:
+                        st.session_state.image_assignments_merged[img_filename] = question_id
+                        save_image_assignments_merged()
+                    if "qc_question_selector" in st.session_state:
+                        del st.session_state.qc_question_selector
+
                 if assigned_images:
                     st.subheader("Assigned Image(s)")
                     for img in assigned_images:
@@ -991,10 +1018,8 @@ def render_qc_step():
                                 if st.button("Image Correct", key=f"img_ok_{img['filename']}", type="primary"):
                                     st.success("Image confirmed!")
                             with img_col2:
-                                if st.button("Remove Image", key=f"img_remove_{img['filename']}"):
-                                    st.session_state.image_assignments.pop(img["filename"], None)
-                                    save_image_assignments()
-                                    st.rerun()
+                                st.button("Remove Image", key=f"img_remove_{img['filename']}",
+                                         on_click=remove_image, args=(img["filename"],))
                         else:
                             st.warning(f"Image not found: {filepath}")
 
@@ -1007,10 +1032,8 @@ def render_qc_step():
                                 filepath = img["filepath"]
                                 if os.path.exists(filepath):
                                     st.image(filepath, caption=f"Page {img['page']}", width=150)
-                                    if st.button(f"Add this image", key=f"add_{img['filename']}"):
-                                        st.session_state.image_assignments[img["filename"]] = q_id
-                                        save_image_assignments()
-                                        st.rerun()
+                                    st.button(f"Add this image", key=f"add_{img['filename']}",
+                                             on_click=assign_image, args=(img["filename"], q_id))
                         else:
                             st.caption("No more unassigned images in this chapter")
 
@@ -1032,11 +1055,8 @@ def render_qc_step():
                                 filepath = img["filepath"]
                                 if os.path.exists(filepath):
                                     st.image(filepath, caption=f"Page {img['page']}", width=180)
-                                    if st.button(f"Assign", key=f"assign_{img['filename']}"):
-                                        st.session_state.image_assignments[img["filename"]] = q_id
-                                        save_image_assignments()
-                                        st.success("Assigned!")
-                                        st.rerun()
+                                    st.button(f"Assign", key=f"assign_{img['filename']}",
+                                             on_click=assign_image, args=(img["filename"], q_id))
                         else:
                             st.caption("No unassigned images in this chapter")
 
