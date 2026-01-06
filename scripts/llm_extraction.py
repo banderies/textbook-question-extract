@@ -364,6 +364,35 @@ def postprocess_questions_llm(client, questions: dict, model_id: str) -> dict:
     return questions
 
 
+def add_page_numbers_to_questions(questions: dict, pages: list[dict], chapters: list[dict]) -> dict:
+    """
+    Add question_page and answer_page fields to all questions.
+
+    Searches pages.json for question text and explanation text to determine
+    which PDF pages they appear on.
+
+    Args:
+        questions: Dict of chapter_key -> list of question dicts
+        pages: List of page dicts from pages.json
+        chapters: List of chapter dicts with start_page info
+
+    Returns:
+        Updated questions dict with page numbers added
+    """
+    from pdf_extraction import detect_question_pages
+
+    for i, ch in enumerate(chapters):
+        ch_key = f"ch{ch['chapter_number']}"
+        ch_start = ch["start_page"]
+        ch_end = chapters[i + 1]["start_page"] if i + 1 < len(chapters) else None
+
+        ch_questions = questions.get(ch_key, [])
+        if ch_questions:
+            detect_question_pages(ch_questions, pages, ch_start, ch_end)
+
+    return questions
+
+
 def associate_context_llm(client, questions: dict, image_assignments: dict,
                           model_id: str) -> tuple[dict, dict, dict]:
     """

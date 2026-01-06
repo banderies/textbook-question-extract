@@ -203,3 +203,175 @@ def get_questions_sharing_image(q_id: str, questions: dict) -> list[str]:
                 shared = [qq["full_id"] for qq in qs if qq.get("image_group") == image_group]
                 return shared
     return [q_id]
+
+
+def find_page_for_text(search_text: str, pages: list[dict], start_page: int = 1, end_page: Optional[int] = None) -> Optional[int]:
+    """
+    Search pages for text and return the page number where it's found.
+
+    Args:
+        search_text: Text to search for (first 80 chars used for matching)
+        pages: List of page dicts with 'page' and 'text' keys
+        start_page: Minimum page number to search (inclusive)
+        end_page: Maximum page number to search (exclusive), None for no limit
+
+    Returns:
+        Page number (1-indexed) where text was found, or None if not found
+    """
+    if not search_text or not pages:
+        return None
+
+    # Normalize search text - take first 80 chars, lowercase, collapse whitespace
+    search_normalized = " ".join(search_text[:80].lower().split())
+
+    for page_dict in pages:
+        page_num = page_dict["page"]
+
+        # Check page range
+        if page_num < start_page:
+            continue
+        if end_page is not None and page_num >= end_page:
+            continue
+
+        # Normalize page text for comparison
+        page_text_normalized = " ".join(page_dict["text"].lower().split())
+
+        if search_normalized in page_text_normalized:
+            return page_num
+
+    return None
+
+
+def find_pages_for_text(search_text: str, pages: list[dict], start_page: int = 1, end_page: Optional[int] = None) -> list[int]:
+    """
+    Search pages for text and return all page numbers where it appears.
+    Detects multi-page content by checking both the start and end of the text.
+
+    Args:
+        search_text: Full text to search for
+        pages: List of page dicts with 'page' and 'text' keys
+        start_page: Minimum page number to search (inclusive)
+        end_page: Maximum page number to search (exclusive), None for no limit
+
+    Returns:
+        List of page numbers (1-indexed) where text appears, or empty list if not found
+    """
+    if not search_text or not pages:
+        return []
+
+    # Find page where text starts (first 80 chars)
+    start_text = " ".join(search_text[:80].lower().split())
+    # Find page where text ends (last 80 chars)
+    end_text = " ".join(search_text[-80:].lower().split()) if len(search_text) > 80 else start_text
+
+    first_page = None
+    last_page = None
+
+    for page_dict in pages:
+        page_num = page_dict["page"]
+
+        # Check page range
+        if page_num < start_page:
+            continue
+        if end_page is not None and page_num >= end_page:
+            continue
+
+        page_text_normalized = " ".join(page_dict["text"].lower().split())
+
+        # Check for start of text
+        if first_page is None and start_text in page_text_normalized:
+            first_page = page_num
+
+        # Check for end of text
+        if end_text in page_text_normalized:
+            last_page = page_num
+
+    if first_page is None:
+        return []
+
+    # If we found both start and end, return all pages in range
+    if last_page is None:
+        last_page = first_page
+
+    return list(range(first_page, last_page + 1))
+
+
+def detect_question_pages(questions: list[dict], pages: list[dict], chapter_start: int, chapter_end: Optional[int] = None) -> list[dict]:
+    """
+    Detect page numbers for questions by searching pages.json.
+
+    Adds 'question_pages' and 'answer_pages' fields (lists) to each question.
+    Also adds legacy 'question_page' and 'answer_page' (first page) for compatibility.
+
+    Args:
+        questions: List of question dicts for a single chapter
+        pages: Full pages list from pages.json
+        chapter_start: Start page of the chapter
+        chapter_end: End page of the chapter (exclusive)
+
+    Returns:
+        Updated questions list with page numbers added
+    """
+    for q in questions:
+        q_text = q.get("text", "")
+        choices = q.get("choices", {})
+
+        # Find where question text starts
+        first_page = find_page_for_text(q_text, pages, chapter_start, chapter_end)
+
+        # Find where last choice ends (to detect multi-page questions)
+        last_page = first_page
+        if choices:
+            last_choice_letter = sorted(choices.keys())[-1]  # e.g., 'D' or 'E'
+            last_choice_text = choices[last_choice_letter]
+            # Search for the last choice text to find where question ends
+            choice_page = find_page_for_text(last_choice_text, pages, chapter_start, chapter_end)
+            if choice_page and first_page:
+                last_page = max(first_page, choice_page)
+
+        # Build page range
+        if first_page and last_page:
+            q_pages = list(range(first_page, last_page + 1))
+        elif first_page:
+            q_pages = [first_page]
+        else:
+            q_pages = []
+
+        q["question_pages"] = q_pages
+        q["question_page"] = q_pages[0] if q_pages else None
+
+        # Find pages for answer/explanation text
+        explanation = q.get("explanation", "")
+        a_pages = find_pages_for_text(explanation, pages, chapter_start, chapter_end)
+        q["answer_pages"] = a_pages
+        q["answer_page"] = a_pages[0] if a_pages else None
+
+    return questions
+
+
+def render_pdf_page(pdf_path: str, page_num: int, zoom: float = 1.5) -> Optional[bytes]:
+    """
+    Render a PDF page as PNG bytes for display in Streamlit.
+
+    Args:
+        pdf_path: Path to the PDF file
+        page_num: Page number (1-indexed)
+        zoom: Zoom factor for rendering (1.5 = 150% size)
+
+    Returns:
+        PNG image bytes, or None if rendering fails
+    """
+    try:
+        doc = fitz.open(pdf_path)
+        if page_num < 1 or page_num > len(doc):
+            doc.close()
+            return None
+
+        page = doc[page_num - 1]  # Convert to 0-indexed
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        png_bytes = pix.tobytes("png")
+        doc.close()
+        return png_bytes
+    except Exception:
+        return None

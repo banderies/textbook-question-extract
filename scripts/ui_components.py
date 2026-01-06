@@ -23,12 +23,12 @@ from state_management import (
 )
 from pdf_extraction import (
     extract_text_from_pdf, extract_images_from_pdf, assign_chapters_to_images,
-    extract_chapter_text
+    extract_chapter_text, render_pdf_page
 )
 from llm_extraction import (
     get_anthropic_client, get_model_options, get_model_id,
     identify_chapters_llm, extract_qa_pairs_llm, process_chapter_extraction,
-    match_images_to_questions_llm, associate_context_llm
+    match_images_to_questions_llm, associate_context_llm, add_page_numbers_to_questions
 )
 
 
@@ -834,6 +834,20 @@ def render_qc_step():
     with col3:
         hide_context = st.checkbox("Hide context-only entries", value=True)
 
+    # Page number detection - always show the button
+    with st.expander("PDF Page Detection", expanded=False):
+        st.caption("Detect which PDF pages contain each question and answer for the PDF preview feature.")
+        if st.button("Detect All Page Numbers", type="primary"):
+            with st.spinner("Detecting page numbers for all questions..."):
+                add_page_numbers_to_questions(
+                    st.session_state.questions,
+                    st.session_state.pages,
+                    st.session_state.chapters
+                )
+                save_questions()
+                st.success("Page numbers detected!")
+                st.rerun()
+
     filtered_questions = []
     for ch_key, q in all_questions:
         q_id = q["full_id"]
@@ -1006,54 +1020,119 @@ def render_qc_step():
                     if "qc_question_selector" in st.session_state:
                         del st.session_state.qc_question_selector
 
-                if assigned_images:
-                    st.subheader("Assigned Image(s)")
-                    for img in assigned_images:
-                        filepath = img["filepath"]
-                        if os.path.exists(filepath):
-                            st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_column_width=True)
+                # Create tabs for Images and PDF Pages
+                images_tab, pdf_tab = st.tabs(["Images", "PDF Pages"])
 
-                            st.button("Remove Image", key=f"img_remove_{img['filename']}",
-                                     on_click=remove_image, args=(img["filename"],))
-                        else:
-                            st.warning(f"Image not found: {filepath}")
+                with images_tab:
+                    if assigned_images:
+                        st.subheader("Assigned Image(s)")
+                        for img in assigned_images:
+                            filepath = img["filepath"]
+                            if os.path.exists(filepath):
+                                st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_column_width=True)
 
-                    with st.expander("Assign different/additional image"):
-                        unassigned = [img for img in st.session_state.images
-                                      if img["filename"] not in st.session_state.image_assignments
-                                      and ch_start <= img["page"] < ch_end]
-                        if unassigned:
-                            for img in unassigned[:5]:
-                                filepath = img["filepath"]
-                                if os.path.exists(filepath):
-                                    st.image(filepath, caption=f"Page {img['page']}", width=150)
-                                    st.button(f"Add this image", key=f"add_{img['filename']}",
-                                             on_click=assign_image, args=(img["filename"], q_id))
-                        else:
-                            st.caption("No more unassigned images in this chapter")
+                                st.button("Remove Image", key=f"img_remove_{img['filename']}",
+                                         on_click=remove_image, args=(img["filename"],))
+                            else:
+                                st.warning(f"Image not found: {filepath}")
 
-                else:
-                    if q.get("has_image"):
-                        st.subheader("Image Required")
-                        st.warning("This question needs an image but none assigned yet.")
+                        with st.expander("Assign different/additional image"):
+                            unassigned = [img for img in st.session_state.images
+                                          if img["filename"] not in st.session_state.image_assignments
+                                          and ch_start <= img["page"] < ch_end]
+                            if unassigned:
+                                for img in unassigned[:5]:
+                                    filepath = img["filepath"]
+                                    if os.path.exists(filepath):
+                                        st.image(filepath, caption=f"Page {img['page']}", width=150)
+                                        st.button(f"Add this image", key=f"add_{img['filename']}",
+                                                 on_click=assign_image, args=(img["filename"], q_id))
+                            else:
+                                st.caption("No more unassigned images in this chapter")
+
                     else:
-                        st.subheader("No Image Assigned")
-                        st.caption("No image currently linked to this question")
-
-                    with st.expander("Manually assign an image" if not q.get("has_image") else "Select from chapter images", expanded=q.get("has_image", False)):
-                        unassigned = [img for img in st.session_state.images
-                                      if img["filename"] not in st.session_state.image_assignments
-                                      and ch_start <= img["page"] < ch_end]
-
-                        if unassigned:
-                            for img in unassigned[:6]:
-                                filepath = img["filepath"]
-                                if os.path.exists(filepath):
-                                    st.image(filepath, caption=f"Page {img['page']}", width=180)
-                                    st.button(f"Assign", key=f"assign_{img['filename']}",
-                                             on_click=assign_image, args=(img["filename"], q_id))
+                        if q.get("has_image"):
+                            st.subheader("Image Required")
+                            st.warning("This question needs an image but none assigned yet.")
                         else:
-                            st.caption("No unassigned images in this chapter")
+                            st.subheader("No Image Assigned")
+                            st.caption("No image currently linked to this question")
+
+                        with st.expander("Manually assign an image" if not q.get("has_image") else "Select from chapter images", expanded=q.get("has_image", False)):
+                            unassigned = [img for img in st.session_state.images
+                                          if img["filename"] not in st.session_state.image_assignments
+                                          and ch_start <= img["page"] < ch_end]
+
+                            if unassigned:
+                                for img in unassigned[:6]:
+                                    filepath = img["filepath"]
+                                    if os.path.exists(filepath):
+                                        st.image(filepath, caption=f"Page {img['page']}", width=180)
+                                        st.button(f"Assign", key=f"assign_{img['filename']}",
+                                                 on_click=assign_image, args=(img["filename"], q_id))
+                            else:
+                                st.caption("No unassigned images in this chapter")
+
+                with pdf_tab:
+                    # Support both single page (legacy) and multi-page formats
+                    question_pages = q.get("question_pages", [])
+                    answer_pages = q.get("answer_pages", [])
+                    # Fall back to single page if lists not available
+                    if not question_pages and q.get("question_page"):
+                        question_pages = [q.get("question_page")]
+                    if not answer_pages and q.get("answer_page"):
+                        answer_pages = [q.get("answer_page")]
+
+                    pdf_path = st.session_state.get("pdf_path")
+
+                    if not pdf_path or not os.path.exists(pdf_path):
+                        st.warning("PDF file not available. Re-load the textbook in Step 1 to enable PDF preview.")
+                    elif not question_pages and not answer_pages:
+                        st.info("Page numbers not detected for this question.")
+                        if st.button("Detect Page Numbers", key=f"detect_pages_{q_id}"):
+                            with st.spinner("Detecting page numbers..."):
+                                add_page_numbers_to_questions(
+                                    st.session_state.questions,
+                                    st.session_state.pages,
+                                    st.session_state.chapters
+                                )
+                                save_questions()
+                                st.rerun()
+                    else:
+                        # Show question pages and answer pages side by side
+                        q_col, a_col = st.columns(2)
+
+                        with q_col:
+                            if len(question_pages) > 1:
+                                st.markdown(f"**Question Pages ({len(question_pages)})**")
+                            else:
+                                st.markdown("**Question Page**")
+
+                            if question_pages:
+                                for page_num in question_pages:
+                                    png_bytes = render_pdf_page(pdf_path, page_num, zoom=1.2)
+                                    if png_bytes:
+                                        st.image(png_bytes, caption=f"Page {page_num}", use_column_width=True)
+                                    else:
+                                        st.error(f"Failed to render page {page_num}")
+                            else:
+                                st.caption("Page not detected")
+
+                        with a_col:
+                            if len(answer_pages) > 1:
+                                st.markdown(f"**Answer Pages ({len(answer_pages)})**")
+                            else:
+                                st.markdown("**Answer Page**")
+
+                            if answer_pages:
+                                for page_num in answer_pages:
+                                    png_bytes = render_pdf_page(pdf_path, page_num, zoom=1.2)
+                                    if png_bytes:
+                                        st.image(png_bytes, caption=f"Page {page_num}", use_column_width=True)
+                                    else:
+                                        st.error(f"Failed to render page {page_num}")
+                            else:
+                                st.caption("Page not detected")
 
 
 # =============================================================================

@@ -133,6 +133,8 @@ def init_session_state():
         st.session_state.selected_model = DEFAULT_MODEL_NAME
     if "qc_selected_idx" not in st.session_state:
         st.session_state.qc_selected_idx = 0
+    if "pdf_path" not in st.session_state:
+        st.session_state.pdf_path = None
 
     if is_fresh_init:
         st.session_state.initialized = True
@@ -150,6 +152,7 @@ def clear_session_data():
     st.session_state.image_assignments_merged = {}
     st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
     st.session_state.qc_selected_idx = 0
+    st.session_state.pdf_path = None
 
 
 # =============================================================================
@@ -177,6 +180,8 @@ def load_settings():
                 st.session_state.current_step = settings["current_step"]
             if "qc_selected_idx" in settings:
                 st.session_state.qc_selected_idx = settings["qc_selected_idx"]
+            if "pdf_path" in settings:
+                st.session_state.pdf_path = settings["pdf_path"]
 
 
 def load_saved_data():
@@ -299,6 +304,7 @@ def save_settings():
         "current_step": st.session_state.current_step,
         "qc_selected_idx": st.session_state.qc_selected_idx,
         "current_pdf": st.session_state.get("current_pdf", ""),
+        "pdf_path": st.session_state.get("pdf_path", ""),
         "last_saved": datetime.now().isoformat()
     }
     with open(get_settings_file(), "w") as f:
