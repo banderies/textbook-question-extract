@@ -48,6 +48,17 @@ def get_selected_model_id() -> str:
     return get_model_id(st.session_state.selected_model)
 
 
+def sort_chapter_keys(keys: list) -> list:
+    """Sort chapter keys naturally (ch1, ch2, ..., ch10, ch11, not ch1, ch10, ch11, ch2).
+
+    Handles keys like 'ch1', 'ch2', 'ch10', 'ch20' and sorts them numerically.
+    """
+    def extract_chapter_num(key: str) -> int:
+        match = re.match(r'ch(\d+)', key)
+        return int(match.group(1)) if match else 0
+    return sorted(keys, key=extract_chapter_num)
+
+
 def prepare_chapter_for_two_pass(ch_num: int, chapters: list[dict]) -> tuple[str, list[str]]:
     """
     Prepare line-numbered chapter text with inline image markers for two-pass extraction.
@@ -244,7 +255,7 @@ def render_source_step():
         st.warning(f"No PDF files found in '{SOURCE_DIR}/' directory. Please add a PDF file.")
         return
 
-    pdf_options = [f.name for f in pdf_files]
+    pdf_options = sorted([f.name for f in pdf_files])
     available_textbooks = get_available_textbooks()
 
     if available_textbooks:
@@ -772,7 +783,7 @@ def render_questions_step():
         st.info("**Next:** Go to **Step 4: Format Questions** to format these into structured data.")
 
         # Chapter selector for preview
-        ch_options = list(raw_questions.keys())
+        ch_options = sort_chapter_keys(raw_questions.keys())
         if ch_options:
             selected_ch = st.selectbox("Preview chapter:", ch_options, key="raw_preview_ch")
 
@@ -957,7 +968,7 @@ def render_format_step():
         st.markdown("---")
         st.subheader("Formatted Questions")
 
-        ch_options = list(st.session_state.questions.keys())
+        ch_options = sort_chapter_keys(st.session_state.questions.keys())
         if ch_options:
             selected_ch = st.selectbox("Preview chapter:", ch_options, key="format_preview_ch")
 
@@ -1037,7 +1048,7 @@ def render_context_step():
     # Preview potential context-only questions (before association)
     if context_only_count > 0:
         potential_context = []
-        for ch_key in sorted(st.session_state.questions.keys()):
+        for ch_key in sort_chapter_keys(st.session_state.questions.keys()):
             for q in st.session_state.questions[ch_key]:
                 if not q.get("choices"):
                     potential_context.append((ch_key, q))
@@ -1069,13 +1080,13 @@ def render_context_step():
         with filter_col2:
             chapter_filter = st.selectbox(
                 "Filter by chapter:",
-                ["All chapters"] + list(st.session_state.questions_merged.keys()),
+                ["All chapters"] + sort_chapter_keys(st.session_state.questions_merged.keys()),
                 key="context_chapter_filter"
             )
 
         # Context-only questions preview expander
         context_only_questions = []
-        for ch_key in sorted(st.session_state.questions_merged.keys()):
+        for ch_key in sort_chapter_keys(st.session_state.questions_merged.keys()):
             for q in st.session_state.questions_merged[ch_key]:
                 if q.get("is_context_only"):
                     context_only_questions.append((ch_key, q))
@@ -1093,7 +1104,7 @@ def render_context_step():
         assignments_to_use = st.session_state.image_assignments_merged if st.session_state.image_assignments_merged else st.session_state.image_assignments
 
         all_merged_questions = []
-        for ch_key in sorted(st.session_state.questions_merged.keys()):
+        for ch_key in sort_chapter_keys(st.session_state.questions_merged.keys()):
             if chapter_filter != "All chapters" and ch_key != chapter_filter:
                 continue
             for q in st.session_state.questions_merged[ch_key]:
@@ -1442,7 +1453,7 @@ def render_qc_step():
         filter_option = st.radio("Show:", ["All", "Unreviewed only", "Reviewed only"], horizontal=True)
     with col2:
         chapter_filter = st.selectbox("Filter by chapter:",
-                                       ["All chapters"] + list(st.session_state.questions.keys()))
+                                       ["All chapters"] + sort_chapter_keys(st.session_state.questions.keys()))
     with col3:
         hide_context = st.checkbox("Hide context-only entries", value=True)
 
