@@ -1306,7 +1306,8 @@ def render_qc_step():
                 save_qc_progress()
 
             # Navigation and action buttons in a single row (fixed position)
-            col1, col2, col3, col4, col5, col6 = st.columns(6)
+            # Column widths tuned to prevent text wrapping
+            col1, col2, col3, col4, col5, col6 = st.columns([1, 1, 1.5, 1.2, 1.3, 1.2])
 
             with col1:
                 st.button("Previous", disabled=(st.session_state.qc_selected_idx <= 0), on_click=go_previous)
@@ -1321,7 +1322,7 @@ def render_qc_step():
                 st.button("Flag Issue", disabled=is_flagged, on_click=flag_issue)
 
             with col5:
-                if st.button("Detect Page Numbers", help="Detect PDF pages for each question"):
+                if st.button("Detect Pages", help="Detect PDF pages for each question"):
                     with st.spinner("Detecting page numbers..."):
                         add_page_numbers_to_questions(
                             st.session_state.questions,
@@ -1332,10 +1333,6 @@ def render_qc_step():
                         st.rerun()
 
             with col6:
-                if is_approved:
-                    st.success("Approved")
-                elif is_flagged:
-                    st.warning("Flagged")
                 if is_approved or is_flagged:
                     st.button("Unapprove", on_click=unapprove)
 
@@ -1344,7 +1341,14 @@ def render_qc_step():
             left_col, right_col = st.columns([1, 1])
 
             with left_col:
-                st.subheader(f"Question {q['local_id']}")
+                # Status indicator with color
+                if is_approved:
+                    status_html = '<span style="color: green;">(approved)</span>'
+                elif is_flagged:
+                    status_html = '<span style="color: orange;">(flagged)</span>'
+                else:
+                    status_html = '<span style="color: red;">(pending)</span>'
+                st.markdown(f"### Question {q['local_id']} {status_html}", unsafe_allow_html=True)
 
                 if q.get("is_context_only"):
                     st.warning("**CONTEXT ONLY** - This entry provides context for sub-questions and will not be exported to Anki.")
