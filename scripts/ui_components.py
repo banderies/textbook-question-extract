@@ -1130,7 +1130,7 @@ def render_context_step():
 
     st.markdown("---")
 
-    col1, col2 = st.columns([2, 3])
+    col1, col2, col3 = st.columns([2, 1.5, 2])
 
     with col1:
         model_options = get_model_options()
@@ -1141,7 +1141,16 @@ def render_context_step():
             save_settings()
 
     with col2:
-        st.write("")
+        context_workers = st.number_input(
+            "Parallel workers:",
+            min_value=1,
+            max_value=50,
+            value=10,
+            help="Number of chapters to process in parallel",
+            key="context_workers"
+        )
+
+    with col3:
         if st.button("Associate Context", type="primary"):
             client = get_anthropic_client()
             if not client:
@@ -1149,39 +1158,161 @@ def render_context_step():
             else:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-
-                total_chapters = len(st.session_state.questions)
-                status_text.text(f"Processing {total_chapters} chapters...")
+                chapter_status = st.empty()
 
                 questions_copy = copy.deepcopy(st.session_state.questions)
                 assignments_copy = copy.deepcopy(st.session_state.image_assignments)
-
                 model_id = get_model_id(st.session_state.selected_model)
-                progress_bar.progress(0.1)
 
-                updated_questions, updated_assignments, stats = associate_context_llm(
-                    client,
-                    questions_copy,
-                    assignments_copy,
-                    model_id=model_id
-                )
+                total_chapters = len(questions_copy)
+                max_workers = min(context_workers, total_chapters)
+                status_text.text(f"Processing {total_chapters} chapters with {max_workers} parallel workers...")
 
-                progress_bar.progress(0.8)
+                # Worker function for parallel context association
+                def process_chapter_context(ch_key: str, ch_questions: list) -> tuple:
+                    """Process context for one chapter. Returns (ch_key, updated_questions, ch_stats)."""
+                    from llm_extraction import get_prompt, stream_message, get_extraction_logger
+                    import json
+                    import re
+
+                    logger = get_extraction_logger()
+                    ch_stats = {"context_questions_found": 0, "sub_questions_updated": 0, "images_copied": 0}
+
+                    if not ch_questions:
+                        return ch_key, ch_questions, ch_stats
+
+                    # Build summary for LLM
+                    questions_summary = []
+                    for q in ch_questions:
+                        has_choices = bool(q.get("choices"))
+                        summary = {
+                            "full_id": q["full_id"],
+                            "local_id": q["local_id"],
+                            "text_preview": q["text"][:200] + "..." if len(q["text"]) > 200 else q["text"],
+                            "has_choices": has_choices
+                        }
+                        questions_summary.append(summary)
+
+                    prompt = get_prompt("associate_context",
+                                       questions_summary=json.dumps(questions_summary, indent=2))
+
+                    try:
+                        response_text, usage = stream_message(
+                            get_anthropic_client(),
+                            model_id,
+                            messages=[{"role": "user", "content": prompt}]
+                        )
+
+                        logger.info(f"Context association {ch_key}: input={usage['input_tokens']:,}, output={usage['output_tokens']:,}")
+
+                        if "```" in response_text:
+                            match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+                            if match:
+                                response_text = match.group(1)
+
+                        result = json.loads(response_text)
+                        mappings = result.get("context_mappings", [])
+
+                        question_by_id = {q["full_id"]: q for q in ch_questions}
+
+                        for mapping in mappings:
+                            context_id = mapping.get("context_id")
+                            sub_ids = mapping.get("sub_question_ids", [])
+
+                            if not context_id or context_id not in question_by_id:
+                                continue
+
+                            context_q = question_by_id[context_id]
+                            context_text = context_q.get("text", "").strip()
+                            context_q["is_context_only"] = True
+                            ch_stats["context_questions_found"] += 1
+
+                            # Count context images
+                            context_images = [img for img, assigned_to in assignments_copy.items() if assigned_to == context_id]
+                            ch_stats["images_copied"] += len(context_images)
+
+                            for sub_id in sub_ids:
+                                if sub_id not in question_by_id:
+                                    continue
+                                sub_q = question_by_id[sub_id]
+                                if sub_q.get("context_merged"):
+                                    continue
+                                original_text = sub_q.get("text", "").strip()
+                                sub_q["text"] = f"{context_text} {original_text}"
+                                sub_q["context_merged"] = True
+                                sub_q["context_from"] = context_id
+                                sub_q["is_context_only"] = False
+                                ch_stats["sub_questions_updated"] += 1
+
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Context association {ch_key}: JSON parse error - {e}")
+                    except Exception as e:
+                        logger.error(f"Context association {ch_key}: API error - {type(e).__name__}: {e}")
+
+                    # Ensure all questions have is_context_only set
+                    for q in ch_questions:
+                        if "is_context_only" not in q:
+                            q["is_context_only"] = False
+
+                    return ch_key, ch_questions, ch_stats
+
+                # Process chapters in parallel
+                completed = 0
+                updated_questions = {}
+                total_stats = {"context_questions_found": 0, "sub_questions_updated": 0, "images_copied": 0}
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_ch = {
+                        executor.submit(process_chapter_context, ch_key, ch_questions): ch_key
+                        for ch_key, ch_questions in questions_copy.items()
+                    }
+
+                    in_progress = set(list(questions_copy.keys())[:max_workers])
+                    chapter_status.text(f"In progress: {', '.join(sorted(in_progress))}")
+
+                    for future in as_completed(future_to_ch):
+                        ch_key = future_to_ch[future]
+                        try:
+                            result_ch_key, result_questions, ch_stats = future.result()
+                            updated_questions[result_ch_key] = result_questions
+                            for key in total_stats:
+                                total_stats[key] += ch_stats[key]
+                        except Exception as e:
+                            logger.error(f"Context association {ch_key}: Failed - {e}")
+                            updated_questions[ch_key] = questions_copy[ch_key]
+
+                        completed += 1
+                        in_progress.discard(ch_key)
+
+                        # Update in-progress set
+                        for next_ch in questions_copy.keys():
+                            if next_ch not in in_progress and next_ch not in updated_questions:
+                                in_progress.add(next_ch)
+                                break
+
+                        progress_bar.progress(completed / total_chapters)
+                        status_text.text(f"Completed {completed}/{total_chapters} chapters...")
+                        if in_progress:
+                            chapter_status.text(f"In progress: {', '.join(sorted(in_progress))}")
+                        else:
+                            chapter_status.empty()
+
                 status_text.text("Saving merged data...")
 
                 st.session_state.questions_merged = updated_questions
-                st.session_state.image_assignments_merged = updated_assignments
+                st.session_state.image_assignments_merged = assignments_copy
                 save_questions_merged()
                 save_image_assignments_merged()
 
                 progress_bar.progress(1.0)
                 status_text.text("Done!")
+                chapter_status.empty()
 
                 st.success(
                     f"Context association complete!\n\n"
-                    f"- Context questions found: {stats['context_questions_found']}\n"
-                    f"- Sub-questions updated: {stats['sub_questions_updated']}\n"
-                    f"- Images copied: {stats['images_copied']}"
+                    f"- Context questions found: {total_stats['context_questions_found']}\n"
+                    f"- Sub-questions updated: {total_stats['sub_questions_updated']}\n"
+                    f"- Images copied: {total_stats['images_copied']}"
                 )
 
                 st.rerun()
