@@ -7,6 +7,7 @@ Contains all Streamlit UI rendering functions.
 import os
 import re
 import copy
+import json
 from pathlib import Path
 from datetime import datetime
 from functools import partial
@@ -19,7 +20,8 @@ from state_management import (
     get_available_textbooks, clear_session_data, load_saved_data,
     load_settings, load_qc_progress, save_settings, save_chapters,
     save_questions, save_raw_questions, save_images, save_pages, save_image_assignments,
-    save_questions_merged, save_image_assignments_merged, save_qc_progress
+    save_questions_merged, save_image_assignments_merged, save_qc_progress,
+    get_raw_questions_file, get_questions_file
 )
 from pdf_extraction import (
     extract_images_from_pdf, assign_chapters_to_images,
@@ -490,6 +492,14 @@ def render_questions_step():
 
     # Initialize logger
     output_dir = get_output_dir()
+
+    # Ensure raw_questions is loaded from file if session state is empty
+    # This prevents data loss on session reset
+    raw_questions_file = get_raw_questions_file()
+    if not st.session_state.raw_questions and os.path.exists(raw_questions_file):
+        with open(raw_questions_file, "r") as f:
+            st.session_state.raw_questions = json.load(f)
+
     logger = get_extraction_logger(output_dir)
 
     # Chapter selector
@@ -720,6 +730,12 @@ def render_format_step():
     Each Q&A pair is processed individually, extracting choices, correct answer, and explanation.
     """)
 
+    # Ensure raw_questions is loaded from file if session state is empty
+    raw_questions_file = get_raw_questions_file()
+    if not st.session_state.raw_questions and os.path.exists(raw_questions_file):
+        with open(raw_questions_file, "r") as f:
+            st.session_state.raw_questions = json.load(f)
+
     raw_questions = st.session_state.get("raw_questions", {})
     if not raw_questions:
         st.warning("Please extract raw questions first (Step 3)")
@@ -886,7 +902,7 @@ def render_format_step():
                                 st.markdown(f"**Correct Answer:** {q.get('correct_answer', 'N/A')}")
 
                             if q.get("explanation"):
-                                st.markdown(f"**Explanation:** {q.get('explanation', '')[:500]}...")
+                                st.markdown(f"**Explanation:** {q.get('explanation', '')}")
 
                         with col2:
                             if q_images:

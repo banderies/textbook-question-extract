@@ -190,6 +190,10 @@ def extract_line_ranges_llm(
             if match:
                 response_text = match.group(1)
 
+        # Fix leading zeros on numbers (LLM copies format from [LINE:0941] → 0941)
+        # JSON doesn't allow leading zeros on numbers, so convert 0941 → 941
+        response_text = re.sub(r':\s*0+(\d+)', r': \1', response_text)
+
         line_ranges = json.loads(response_text)
         logger.info(f"{log_prefix}: Found {len(line_ranges)} Q&A pairs")
 
