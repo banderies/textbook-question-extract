@@ -526,7 +526,7 @@ def render_questions_step():
             save_settings()
 
     # Helper function to extract a single chapter
-    def extract_single_chapter(ch_idx: int, pages_with_lines: list, lines_with_images: list):
+    def extract_single_chapter(ch_idx: int, pages_with_lines: list, lines_with_images: list, on_progress=None):
         ch = st.session_state.chapters[ch_idx]
         ch_num = ch["chapter_number"]
         ch_key = f"ch{ch_num}"
@@ -538,7 +538,7 @@ def render_questions_step():
             lines_with_images, pages_with_lines, start_page, end_page
         )
 
-        line_ranges = extract_line_ranges_llm(get_anthropic_client(), ch_num, ch_text, model_id)
+        line_ranges = extract_line_ranges_llm(get_anthropic_client(), ch_num, ch_text, model_id, on_progress=on_progress)
 
         if not line_ranges:
             logger.warning(f"Chapter {ch_num}: No line ranges extracted")
@@ -573,25 +573,37 @@ def render_questions_step():
 
     with btn_col1:
         if st.button(f"Extract Chapter {ch_num}", type="primary"):
-            with st.spinner(f"Extracting Chapter {ch_num}..."):
-                pdf_path = st.session_state.get("pdf_path")
-                if not pdf_path or not os.path.exists(pdf_path):
-                    st.error("PDF path not found. Please reload the PDF in Step 1.")
+            progress_text = st.empty()
+            progress_text.text(f"Extracting Chapter {ch_num}... Preparing text...")
+
+            pdf_path = st.session_state.get("pdf_path")
+            if not pdf_path or not os.path.exists(pdf_path):
+                st.error("PDF path not found. Please reload the PDF in Step 1.")
+            else:
+                pages_with_lines, all_lines = extract_text_with_lines(pdf_path)
+                lines_with_images = insert_image_markers(
+                    all_lines, st.session_state.images, pages_with_lines
+                )
+
+                progress_text.text(f"Extracting Chapter {ch_num}... Streaming response...")
+
+                # Progress callback for streaming
+                def update_progress(tokens, text):
+                    # Count questions found so far by counting question_id occurrences
+                    q_count = text.count('"question_id"')
+                    progress_text.text(f"Extracting Chapter {ch_num}... {tokens} tokens, ~{q_count} questions found")
+
+                raw_questions = extract_single_chapter(selected_ch_idx, pages_with_lines, lines_with_images, update_progress)
+
+                if raw_questions:
+                    st.session_state.raw_questions[ch_key] = raw_questions
+                    save_raw_questions()
+                    progress_text.empty()
+                    st.success(f"Extracted {len(raw_questions)} raw Q&A pairs from Chapter {ch_num}")
                 else:
-                    pages_with_lines, all_lines = extract_text_with_lines(pdf_path)
-                    lines_with_images = insert_image_markers(
-                        all_lines, st.session_state.images, pages_with_lines
-                    )
-
-                    raw_questions = extract_single_chapter(selected_ch_idx, pages_with_lines, lines_with_images)
-
-                    if raw_questions:
-                        st.session_state.raw_questions[ch_key] = raw_questions
-                        save_raw_questions()
-                        st.success(f"Extracted {len(raw_questions)} raw Q&A pairs from Chapter {ch_num}")
-                    else:
-                        st.warning(f"No questions extracted from Chapter {ch_num}")
-                    st.rerun()
+                    progress_text.empty()
+                    st.warning(f"No questions extracted from Chapter {ch_num}")
+                st.rerun()
 
     with btn_col2:
         if st.button("Extract ALL Chapters"):
@@ -620,6 +632,13 @@ def render_questions_step():
                 ch_num = ch["chapter_number"]
                 ch_key = f"ch{ch_num}"
 
+                # Progress callback for streaming
+                def make_progress_callback(chapter_num, chapter_idx, total):
+                    def update_progress(tokens, text):
+                        q_count = text.count('"question_id"')
+                        status_text.text(f"Chapter {chapter_num} ({chapter_idx+1}/{total}): {tokens} tokens, ~{q_count} questions...")
+                    return update_progress
+
                 status_text.text(f"Extracting Chapter {ch_num} ({i+1}/{total_chapters})...")
 
                 # Build chapter text with line numbers
@@ -629,8 +648,9 @@ def render_questions_step():
                     lines_with_images, pages_with_lines, start_page, end_page
                 )
 
-                # Call LLM to identify line ranges
-                line_ranges = extract_line_ranges_llm(client, ch_num, ch_text, model_id)
+                # Call LLM to identify line ranges with streaming progress
+                progress_cb = make_progress_callback(ch_num, i, total_chapters)
+                line_ranges = extract_line_ranges_llm(client, ch_num, ch_text, model_id, on_progress=progress_cb)
 
                 if not line_ranges:
                     logger.warning(f"Chapter {ch_num}: No line ranges extracted")

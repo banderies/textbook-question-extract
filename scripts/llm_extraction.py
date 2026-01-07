@@ -106,7 +106,8 @@ def stream_message(
     model_id: str,
     messages: list[dict],
     max_tokens: int = None,
-    on_token: callable = None
+    on_token: callable = None,
+    on_progress: callable = None
 ) -> tuple[str, dict]:
     """
     Stream a message from the Anthropic API.
@@ -116,7 +117,8 @@ def stream_message(
         model_id: Model ID to use
         messages: List of message dicts
         max_tokens: Max output tokens (defaults to model max)
-        on_token: Optional callback called with each token chunk for progress
+        on_token: Optional callback called with each token chunk (chunk_text)
+        on_progress: Optional callback called periodically (output_tokens, response_text_so_far)
 
     Returns:
         Tuple of (response_text, usage_dict)
@@ -129,6 +131,7 @@ def stream_message(
     input_tokens = 0
     output_tokens = 0
     stop_reason = None
+    token_count = 0
 
     with client.messages.stream(
         model=model_id,
@@ -145,13 +148,21 @@ def stream_message(
                     if hasattr(event, 'delta') and hasattr(event.delta, 'text'):
                         chunk = event.delta.text
                         response_text += chunk
+                        token_count += 1
                         if on_token:
                             on_token(chunk)
+                        # Call progress callback every 50 tokens
+                        if on_progress and token_count % 50 == 0:
+                            on_progress(token_count, response_text)
                 elif event.type == 'message_delta':
                     if hasattr(event, 'usage'):
                         output_tokens = event.usage.output_tokens
                     if hasattr(event, 'delta') and hasattr(event.delta, 'stop_reason'):
                         stop_reason = event.delta.stop_reason
+
+    # Final progress callback
+    if on_progress:
+        on_progress(output_tokens or token_count, response_text)
 
     usage = {
         "input_tokens": input_tokens,
@@ -197,7 +208,8 @@ def extract_line_ranges_llm(
     client,
     chapter_num: int,
     chapter_text: str,
-    model_id: str
+    model_id: str,
+    on_progress: callable = None
 ) -> list[dict]:
     """
     First pass: Extract just line ranges for each Q&A pair.
@@ -209,6 +221,7 @@ def extract_line_ranges_llm(
         chapter_num: Chapter number for logging
         chapter_text: Line-numbered chapter text with [LINE:NNNN] markers
         model_id: Model to use
+        on_progress: Optional callback (tokens, response_text) for progress updates
 
     Returns:
         List of dicts with keys:
@@ -231,7 +244,8 @@ def extract_line_ranges_llm(
         response_text, usage = stream_message(
             client,
             model_id,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
+            on_progress=on_progress
         )
 
         input_tokens = usage["input_tokens"]
@@ -310,18 +324,18 @@ def format_qa_pair_llm(
 
     for attempt in range(max_retries + 1):
         try:
-            response = client.messages.create(
-                model=model_id,
-                max_tokens=get_model_max_tokens(model_id),
-                messages=[{"role": "user", "content": prompt}]
+            # Use streaming with reasonable max_tokens for individual Q&A
+            response_text, usage = stream_message(
+                client,
+                model_id,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=8192  # Individual Q&A doesn't need full model capacity
             )
 
             logger.debug(
-                f"{log_prefix}: in={response.usage.input_tokens}, "
-                f"out={response.usage.output_tokens}"
+                f"{log_prefix}: in={usage['input_tokens']}, "
+                f"out={usage['output_tokens']}"
             )
-
-            response_text = response.content[0].text
 
             # Extract JSON from markdown code blocks if present
             if "```" in response_text:
