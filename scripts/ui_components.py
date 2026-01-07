@@ -1214,15 +1214,6 @@ def render_qc_step():
                                        ["All chapters"] + list(st.session_state.questions.keys()))
     with col3:
         hide_context = st.checkbox("Hide context-only entries", value=True)
-        if st.button("Detect Page Numbers", help="Detect PDF pages for each question"):
-            with st.spinner("Detecting page numbers..."):
-                add_page_numbers_to_questions(
-                    st.session_state.questions,
-                    st.session_state.pages,
-                    st.session_state.chapters
-                )
-                save_questions()
-                st.rerun()
 
     filtered_questions = []
     for ch_key, q in all_questions:
@@ -1321,23 +1312,32 @@ def render_qc_step():
                 st.button("Previous", disabled=(st.session_state.qc_selected_idx <= 0), on_click=go_previous)
 
             with col2:
-                st.button("Approve & Next", type="primary", disabled=is_approved, on_click=approve_and_next)
+                st.button("Next", disabled=(st.session_state.qc_selected_idx >= len(filtered_questions) - 1), on_click=go_next)
 
             with col3:
-                st.button("Flag Issue", disabled=is_flagged, on_click=flag_issue)
+                st.button("Approve & Next", type="primary", disabled=is_approved, on_click=approve_and_next)
 
             with col4:
-                if is_approved or is_flagged:
-                    st.button("Unapprove", on_click=unapprove)
+                st.button("Flag Issue", disabled=is_flagged, on_click=flag_issue)
 
             with col5:
-                st.button("Next", disabled=(st.session_state.qc_selected_idx >= len(filtered_questions) - 1), on_click=go_next)
+                if st.button("Detect Page Numbers", help="Detect PDF pages for each question"):
+                    with st.spinner("Detecting page numbers..."):
+                        add_page_numbers_to_questions(
+                            st.session_state.questions,
+                            st.session_state.pages,
+                            st.session_state.chapters
+                        )
+                        save_questions()
+                        st.rerun()
 
             with col6:
                 if is_approved:
                     st.success("Approved")
                 elif is_flagged:
                     st.warning("Flagged")
+                if is_approved or is_flagged:
+                    st.button("Unapprove", on_click=unapprove)
 
             st.markdown("---")
 
@@ -1405,7 +1405,7 @@ def render_qc_step():
                         for img in assigned_images:
                             filepath = img["filepath"]
                             if os.path.exists(filepath):
-                                st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_column_width=True)
+                                st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", width="stretch")
 
                                 st.button("Remove Image", key=f"img_remove_{img['filename']}",
                                          on_click=remove_image, args=(img["filename"],))
@@ -1488,7 +1488,7 @@ def render_qc_step():
                                 for page_num in question_pages:
                                     png_bytes = render_pdf_page(pdf_path, page_num, zoom=1.2)
                                     if png_bytes:
-                                        st.image(png_bytes, caption=f"Page {page_num}", use_column_width=True)
+                                        st.image(png_bytes, caption=f"Page {page_num}", width="stretch")
                                     else:
                                         st.error(f"Failed to render page {page_num}")
                             else:
@@ -1504,7 +1504,7 @@ def render_qc_step():
                                 for page_num in answer_pages:
                                     png_bytes = render_pdf_page(pdf_path, page_num, zoom=1.2)
                                     if png_bytes:
-                                        st.image(png_bytes, caption=f"Page {page_num}", use_column_width=True)
+                                        st.image(png_bytes, caption=f"Page {page_num}", width="stretch")
                                     else:
                                         st.error(f"Failed to render page {page_num}")
                             else:
