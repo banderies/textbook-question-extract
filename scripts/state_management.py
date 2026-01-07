@@ -208,7 +208,9 @@ def load_saved_data():
             st.session_state.pages = json.load(f)
     if os.path.exists(chapters_file):
         with open(chapters_file) as f:
-            st.session_state.chapters = json.load(f)
+            chapters = json.load(f)
+            # Sort chapters by chapter_number to ensure correct ordering
+            st.session_state.chapters = sorted(chapters, key=lambda ch: ch.get("chapter_number", 0))
     if os.path.exists(chapter_text_file):
         with open(chapter_text_file) as f:
             st.session_state.chapter_texts = json.load(f)

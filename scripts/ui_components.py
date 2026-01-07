@@ -420,6 +420,8 @@ def render_chapters_step():
             if st.button(btn_label, type="primary"):
                 with st.spinner(f"Using {st.session_state.selected_model} to identify chapters..."):
                     chapters = identify_chapters_llm(client, st.session_state.pages, get_selected_model_id())
+                    # Sort chapters by chapter_number to ensure correct ordering
+                    chapters = sorted(chapters, key=lambda ch: ch.get("chapter_number", 0))
                     st.session_state.chapters = chapters
 
                     for i, ch in enumerate(chapters):
@@ -1024,6 +1026,21 @@ def render_context_step():
     with col2:
         st.metric("Potential Context Questions", context_only_count)
 
+    # Preview potential context-only questions (before association)
+    if context_only_count > 0:
+        potential_context = []
+        for ch_key in sorted(st.session_state.questions.keys()):
+            for q in st.session_state.questions[ch_key]:
+                if not q.get("choices"):
+                    potential_context.append((ch_key, q))
+
+        with st.expander(f"Preview Potential Context Questions ({len(potential_context)} without answer choices)", expanded=False):
+            for ch_key, q in potential_context:
+                q_text = q.get("text", "")[:150]
+                if len(q.get("text", "")) > 150:
+                    q_text += "..."
+                st.markdown(f"**{q['full_id']}**: {q_text}")
+
     st.markdown("---")
 
     merged_count = sum(len(qs) for qs in st.session_state.questions_merged.values())
@@ -1047,6 +1064,21 @@ def render_context_step():
                 ["All chapters"] + list(st.session_state.questions_merged.keys()),
                 key="context_chapter_filter"
             )
+
+        # Context-only questions preview expander
+        context_only_questions = []
+        for ch_key in sorted(st.session_state.questions_merged.keys()):
+            for q in st.session_state.questions_merged[ch_key]:
+                if q.get("is_context_only"):
+                    context_only_questions.append((ch_key, q))
+
+        if context_only_questions:
+            with st.expander(f"Preview Context-Only Questions ({len(context_only_questions)} total)", expanded=False):
+                for ch_key, q in context_only_questions:
+                    q_text = q.get("question", "")[:150]
+                    if len(q.get("question", "")) > 150:
+                        q_text += "..."
+                    st.markdown(f"**{q['full_id']}**: {q_text}")
 
         st.subheader("Merged Questions Preview")
 
