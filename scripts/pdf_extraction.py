@@ -10,6 +10,10 @@ from typing import Optional
 import fitz  # PyMuPDF
 
 
+# Module-level cache for position data between extract_text_with_lines and insert_image_markers
+_position_cache: dict = {}
+
+
 def extract_text_from_pdf(pdf_path: str) -> list[dict]:
     """Extract raw text from PDF using PyMuPDF."""
     doc = fitz.open(pdf_path)
@@ -20,6 +24,499 @@ def extract_text_from_pdf(pdf_path: str) -> list[dict]:
         pages.append({"page": page_num + 1, "text": text})
     doc.close()
     return pages
+
+
+def extract_text_with_positions(pdf_path: str) -> list[dict]:
+    """
+    Extract text lines from PDF with their actual y-positions.
+
+    Returns a list of dicts, each containing:
+    - page: 1-indexed page number
+    - y_position: vertical position on page (PDF points, top of line)
+    - y_bottom: bottom of the text line
+    - text: the text content
+    - type: "text"
+
+    This allows accurate interleaving with images based on actual positions.
+    """
+    doc = fitz.open(pdf_path)
+    all_items = []
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        # Get text as dictionary with position info
+        text_dict = page.get_text("dict")
+
+        for block in text_dict.get("blocks", []):
+            if block.get("type") != 0:  # Skip non-text blocks (images)
+                continue
+
+            # Process each line in the block
+            for line in block.get("lines", []):
+                bbox = line.get("bbox", [0, 0, 0, 0])
+                y_top = bbox[1]
+                y_bottom = bbox[3]
+
+                # Concatenate all spans in the line
+                line_text = ""
+                for span in line.get("spans", []):
+                    line_text += span.get("text", "")
+
+                if line_text.strip():  # Skip empty lines
+                    all_items.append({
+                        "page": page_num + 1,
+                        "y_position": y_top,
+                        "y_bottom": y_bottom,
+                        "text": line_text,
+                        "type": "text"
+                    })
+
+    doc.close()
+
+    # Sort by page, then by y_position
+    all_items.sort(key=lambda x: (x["page"], x["y_position"]))
+
+    return all_items
+
+
+def extract_text_with_lines(pdf_path: str) -> tuple[list[dict], list[str]]:
+    """
+    Extract text with line numbers and build a global line array.
+
+    Uses position-aware extraction to get accurate y-coordinates for each line,
+    enabling proper interleaving with images.
+
+    Returns:
+        Tuple of:
+        - pages: List of {"page": N, "text": "...", "start_line": N, "end_line": N}
+        - lines: Global list of all lines (0-indexed), each with position metadata
+        - lines_with_positions: List of dicts with text and y_position for each line
+    """
+    doc = fitz.open(pdf_path)
+    pages = []
+    all_lines = []
+    lines_with_positions = []
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        text_dict = page.get_text("dict")
+
+        page_lines = []
+        page_lines_with_pos = []
+
+        for block in text_dict.get("blocks", []):
+            if block.get("type") != 0:  # Skip non-text blocks
+                continue
+
+            for line in block.get("lines", []):
+                bbox = line.get("bbox", [0, 0, 0, 0])
+                y_top = bbox[1]
+                y_bottom = bbox[3]
+
+                # Concatenate all spans in the line
+                line_text = ""
+                for span in line.get("spans", []):
+                    line_text += span.get("text", "")
+
+                # Include all lines, even empty ones (preserve structure)
+                page_lines.append(line_text)
+                page_lines_with_pos.append({
+                    "text": line_text,
+                    "y_position": y_top,
+                    "y_bottom": y_bottom,
+                    "page": page_num + 1
+                })
+
+        # Sort by y_position within the page
+        page_lines_with_pos.sort(key=lambda x: x["y_position"])
+        page_lines = [item["text"] for item in page_lines_with_pos]
+
+        start_line = len(all_lines)
+        all_lines.extend(page_lines)
+        lines_with_positions.extend(page_lines_with_pos)
+        end_line = len(all_lines)
+
+        # Reconstruct full text for compatibility
+        full_text = "\n".join(page_lines)
+
+        pages.append({
+            "page": page_num + 1,
+            "text": full_text,
+            "start_line": start_line,
+            "end_line": end_line
+        })
+
+    doc.close()
+
+    # Store position data in module-level cache for insert_image_markers
+    _position_cache["lines_with_positions"] = lines_with_positions
+
+    return pages, all_lines
+
+
+def insert_image_markers(
+    lines: list[str],
+    images: list[dict],
+    pages: list[dict]
+) -> list[str]:
+    """
+    Insert [IMAGE: filename.jpg] markers at correct positions in the text.
+
+    Uses actual y-positions from both text lines and images to determine
+    exact placement. Images are inserted AFTER the last text line that
+    appears above them on the page.
+
+    Args:
+        lines: Global list of all text lines
+        images: Image metadata with page, y_position, filename
+        pages: Page metadata with start_line, end_line
+
+    Returns:
+        New list of lines with image markers inserted
+    """
+    lines_with_positions = _position_cache.get("lines_with_positions", [])
+
+    if not lines_with_positions:
+        raise RuntimeError(
+            "No position data available. Call extract_text_with_lines() first, "
+            "or use insert_image_markers_for_page() for single-page operations."
+        )
+
+    if len(lines_with_positions) != len(lines):
+        raise RuntimeError(
+            f"Position cache mismatch: {len(lines_with_positions)} positions vs {len(lines)} lines. "
+            "Call extract_text_with_lines() again to refresh the cache."
+        )
+
+    # Build a combined list of text lines and images with positions
+    combined_items = []
+
+    # Add text lines with their positions
+    for idx, line_data in enumerate(lines_with_positions):
+        combined_items.append({
+            "type": "text",
+            "page": line_data["page"],
+            "y_position": line_data["y_position"],
+            "content": lines[idx] if idx < len(lines) else "",
+            "index": idx
+        })
+
+    # Add images with their positions
+    for img in images:
+        combined_items.append({
+            "type": "image",
+            "page": img["page"],
+            "y_position": img.get("y_position", 0),
+            "content": f"[IMAGE: {img['filename']}]",
+            "filename": img["filename"]
+        })
+
+    # Sort by page, then by y_position
+    # For items at the same position, text comes before images
+    combined_items.sort(key=lambda x: (x["page"], x["y_position"], 0 if x["type"] == "text" else 1))
+
+    # Build result list
+    result = []
+    for item in combined_items:
+        result.append(item["content"])
+
+    return result
+
+
+def extract_page_text_with_positions(pdf_path: str, page_num: int) -> tuple[list[str], list[dict]]:
+    """
+    Extract text lines with positions for a single page.
+
+    Use this for previews or when you only need one page.
+
+    Args:
+        pdf_path: Path to the PDF file
+        page_num: Page number (1-indexed)
+
+    Returns:
+        Tuple of:
+        - lines: List of text strings
+        - lines_with_positions: List of dicts with text, y_position, page
+    """
+    doc = fitz.open(pdf_path)
+
+    if page_num < 1 or page_num > len(doc):
+        doc.close()
+        return [], []
+
+    page = doc[page_num - 1]  # Convert to 0-indexed
+    text_dict = page.get_text("dict")
+
+    lines_with_pos = []
+
+    for block in text_dict.get("blocks", []):
+        if block.get("type") != 0:  # Skip non-text blocks
+            continue
+
+        for line in block.get("lines", []):
+            bbox = line.get("bbox", [0, 0, 0, 0])
+            y_top = bbox[1]
+            y_bottom = bbox[3]
+
+            line_text = ""
+            for span in line.get("spans", []):
+                line_text += span.get("text", "")
+
+            lines_with_pos.append({
+                "text": line_text,
+                "y_position": y_top,
+                "y_bottom": y_bottom,
+                "page": page_num
+            })
+
+    doc.close()
+
+    # Sort by y_position
+    lines_with_pos.sort(key=lambda x: x["y_position"])
+    lines = [item["text"] for item in lines_with_pos]
+
+    return lines, lines_with_pos
+
+
+def insert_image_markers_for_page(
+    lines: list[str],
+    lines_with_positions: list[dict],
+    images: list[dict]
+) -> list[str]:
+    """
+    Insert image markers for a single page using position data.
+
+    This is the preferred method for previews - pass the position data directly.
+
+    Args:
+        lines: List of text lines
+        lines_with_positions: Position data for each line
+        images: Image metadata with page, y_position, filename
+
+    Returns:
+        List of lines with image markers inserted at correct positions
+    """
+    if len(lines) != len(lines_with_positions):
+        raise ValueError("lines and lines_with_positions must have same length")
+
+    # Build combined list
+    combined_items = []
+
+    for idx, line_data in enumerate(lines_with_positions):
+        combined_items.append({
+            "type": "text",
+            "page": line_data["page"],
+            "y_position": line_data["y_position"],
+            "content": lines[idx]
+        })
+
+    for img in images:
+        combined_items.append({
+            "type": "image",
+            "page": img["page"],
+            "y_position": img.get("y_position", 0),
+            "content": f"[IMAGE: {img['filename']}]"
+        })
+
+    # Sort by page, then y_position (text before images at same position)
+    combined_items.sort(key=lambda x: (x["page"], x["y_position"], 0 if x["type"] == "text" else 1))
+
+    return [item["content"] for item in combined_items]
+
+
+def build_chapter_text_with_lines(
+    lines: list[str],
+    pages: list[dict],
+    start_page: int,
+    end_page: Optional[int]
+) -> tuple[str, dict]:
+    """
+    Build chapter text preserving GLOBAL line numbers for LLM consumption.
+
+    Output format (preserves global line numbers):
+    [LINE:0450] First line of chapter text
+    [LINE:0451] Second line of chapter text
+    [IMAGE: p014_y0321_x0172_0.jpeg]
+    [LINE:0452] Third line...
+
+    This ensures the LLM returns global line numbers that can be used
+    directly without any mapping/translation.
+
+    Args:
+        lines: Global line array (may include [IMAGE:] markers)
+        pages: Page metadata with start_line, end_line
+        start_page: First page of chapter (1-indexed)
+        end_page: Last page of chapter (exclusive), or None for end
+
+    Returns:
+        Tuple of:
+        - numbered_text: The chapter text with GLOBAL line numbers
+        - line_mapping: Dict mapping global line numbers to array indices
+    """
+    # Find line range for chapter
+    start_line = None
+    end_line = None
+
+    for p in pages:
+        if p["page"] >= start_page:
+            if end_page is None or p["page"] < end_page:
+                if start_line is None:
+                    start_line = p["start_line"]
+                end_line = p["end_line"]
+
+    if start_line is None:
+        return "", {}
+
+    # Account for image markers inserted before start_line
+    # We need to scan from the beginning to count inserted markers
+    actual_start = 0
+    actual_end = len(lines)
+
+    # Find actual indices by scanning (image markers shift positions)
+    current_orig_idx = 0
+    for i, line in enumerate(lines):
+        if line.startswith("[IMAGE:"):
+            continue
+        if current_orig_idx == start_line:
+            actual_start = i
+        if current_orig_idx == end_line:
+            actual_end = i
+            break
+        current_orig_idx += 1
+
+    # Build output preserving GLOBAL line numbers
+    output_lines = []
+    global_line_num = start_line + 1  # 1-indexed global line number
+    line_mapping = {}
+
+    for i in range(actual_start, min(actual_end, len(lines))):
+        line = lines[i]
+
+        if line.startswith("[IMAGE:"):
+            # Image markers don't get line numbers
+            output_lines.append(line)
+        else:
+            output_lines.append(f"[LINE:{global_line_num:04d}] {line}")
+            line_mapping[global_line_num] = i
+            global_line_num += 1
+
+    return "\n".join(output_lines), line_mapping
+
+
+def extract_lines_by_range(lines: list[str], start: int, end: int) -> str:
+    """
+    Extract text from lines array by line number range.
+
+    Handles the fact that image markers don't have line numbers.
+    Finds the actual indices that correspond to the given line numbers.
+
+    Args:
+        lines: The lines array (may include [IMAGE:] markers)
+        start: Starting line number (1-indexed, from [LINE:NNNN])
+        end: Ending line number (inclusive)
+
+    Returns:
+        The extracted text (without line number prefixes)
+    """
+    if start <= 0 or end < start:
+        return ""
+
+    result = []
+    current_line_num = 0
+
+    for line in lines:
+        if line.startswith("[IMAGE:"):
+            # Include image markers that fall within the range
+            if current_line_num >= start and current_line_num <= end:
+                result.append(line)
+            continue
+
+        current_line_num += 1
+
+        if current_line_num >= start and current_line_num <= end:
+            # Remove the [LINE:NNNN] prefix if present
+            if line.startswith("[LINE:"):
+                # Find the closing bracket
+                bracket_end = line.find("]")
+                if bracket_end > 0:
+                    line = line[bracket_end + 2:]  # +2 to skip "] "
+            result.append(line)
+
+        if current_line_num > end:
+            break
+
+    return "\n".join(result)
+
+
+def extract_lines_by_range_mapped(
+    lines: list[str],
+    start: int,
+    end: int,
+    line_mapping: dict
+) -> str:
+    """
+    Extract text from lines array using a line mapping for translation.
+
+    This is used when the line numbers are chapter-relative (from LLM output)
+    and need to be translated to global array indices.
+
+    Args:
+        lines: The global lines array (may include [IMAGE:] markers)
+        start: Starting line number (1-indexed, chapter-relative)
+        end: Ending line number (inclusive, chapter-relative)
+        line_mapping: Dict mapping chapter line numbers to global array indices
+
+    Returns:
+        The extracted text (without line number prefixes)
+    """
+    if start <= 0 or end < start or not line_mapping:
+        return ""
+
+    # Find the global indices for start and end
+    start_idx = line_mapping.get(start)
+    end_idx = line_mapping.get(end)
+
+    if start_idx is None or end_idx is None:
+        # Try to find closest valid indices
+        valid_keys = sorted(line_mapping.keys())
+        if not valid_keys:
+            return ""
+
+        # Find closest start
+        start_idx = None
+        for k in valid_keys:
+            if k >= start:
+                start_idx = line_mapping[k]
+                break
+        if start_idx is None:
+            start_idx = line_mapping[valid_keys[-1]]
+
+        # Find closest end
+        end_idx = None
+        for k in reversed(valid_keys):
+            if k <= end:
+                end_idx = line_mapping[k]
+                break
+        if end_idx is None:
+            end_idx = line_mapping[valid_keys[0]]
+
+    # Extract lines from start_idx to end_idx (inclusive)
+    result = []
+    for i in range(start_idx, min(end_idx + 1, len(lines))):
+        line = lines[i]
+
+        # Remove the [LINE:NNNN] prefix if present
+        if line.startswith("[LINE:"):
+            bracket_end = line.find("]")
+            if bracket_end > 0:
+                line = line[bracket_end + 2:]  # +2 to skip "] "
+
+        result.append(line)
+
+    # Also include any images between start_idx and end_idx
+    # (They should already be in the range, but let's ensure we don't skip them)
+
+    return "\n".join(result)
 
 
 def extract_images_from_pdf(pdf_path: str, output_dir: str) -> list[dict]:

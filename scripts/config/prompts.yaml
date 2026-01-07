@@ -192,3 +192,105 @@ associate_context:
     If there are no context relationships, return: {{"context_mappings": []}}
 
     Return ONLY the JSON, no other text.
+
+extract_line_ranges:
+  description: "First pass: identify line ranges for each Q&A pair (minimal output)"
+  prompt: |
+    Analyze this chapter text and identify all question-answer pairs.
+
+    The text has line numbers in format [LINE:NNNN]. Images are marked as [IMAGE: filename].
+
+    TEXTBOOK STRUCTURE:
+    - QUESTIONS section: Contains numbered questions with answer choices (A/B/C/D/E)
+    - ANSWERS section: Contains explanations starting with "Answer X." where X is the correct letter
+    - Questions and answers are in the same order (Question 1 matches Answer 1, etc.)
+
+    MULTI-PART QUESTIONS:
+    - Some questions have a context (e.g., "1") followed by sub-questions (e.g., "1a", "1b", "1c")
+    - The context has no answer choices - it's just a clinical scenario
+    - Each sub-question has its own answer in the ANSWERS section
+    - Extract the context as a separate entry with empty answer_start/answer_end
+
+    For EACH question (including context-only questions), output:
+    - question_id: The question number as it appears (e.g., "1", "1a", "2b", "15")
+    - question_start: Line number where question text begins
+    - question_end: Line number where question ends (after last choice if present)
+    - answer_start: Line number where answer/explanation begins (0 if no answer, e.g., for context questions)
+    - answer_end: Line number where answer ends (0 if no answer)
+    - correct_letter: The correct answer letter (A/B/C/D/E), or "" for context questions
+    - image_files: Array of image filenames that appear within this question's line range
+
+    Return ONLY a JSON array:
+    [
+      {{
+        "question_id": "1",
+        "question_start": 5,
+        "question_end": 8,
+        "answer_start": 0,
+        "answer_end": 0,
+        "correct_letter": "",
+        "image_files": ["p014_y0321_x0172_0.jpeg"]
+      }},
+      {{
+        "question_id": "1a",
+        "question_start": 9,
+        "question_end": 15,
+        "answer_start": 450,
+        "answer_end": 465,
+        "correct_letter": "A",
+        "image_files": []
+      }},
+      ...
+    ]
+
+    CHAPTER TEXT:
+    {chapter_text}
+
+format_qa_pair:
+  description: "Second pass: format a single Q&A pair into structured JSON"
+  prompt: |
+    Extract and format this question-answer pair from a medical textbook.
+
+    QUESTION ID: {question_id}
+
+    QUESTION TEXT (copy verbatim):
+    {question_text}
+
+    ANSWER TEXT (copy verbatim):
+    {answer_text}
+
+    INSTRUCTIONS:
+    1. Copy ALL text EXACTLY as it appears - do not paraphrase or shorten
+    2. Extract the question text (before the choices)
+    3. Extract each answer choice (A, B, C, D, and E if present)
+    4. Copy the full explanation verbatim
+    5. If this is a context-only question (no choices), leave choices empty and mark is_context_only: true
+
+    Return ONLY a JSON object:
+    {{
+      "id": "{question_id}",
+      "text": "Full question text copied verbatim",
+      "choices": {{
+        "A": "Choice A text verbatim",
+        "B": "Choice B text verbatim",
+        "C": "Choice C text verbatim",
+        "D": "Choice D text verbatim"
+      }},
+      "has_image": true,
+      "image_group": "1",
+      "correct_answer": "A",
+      "explanation": "Full explanation copied verbatim",
+      "is_context_only": false
+    }}
+
+    For context-only questions (no choices):
+    {{
+      "id": "{question_id}",
+      "text": "Clinical scenario text copied verbatim",
+      "choices": {{}},
+      "has_image": true,
+      "image_group": "1",
+      "correct_answer": "",
+      "explanation": "",
+      "is_context_only": true
+    }}

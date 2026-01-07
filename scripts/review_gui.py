@@ -23,6 +23,7 @@ from ui_components import (
     render_source_step,
     render_chapters_step,
     render_questions_step,
+    render_format_step,
     render_context_step,
     render_qc_step,
     render_export_step,
@@ -64,6 +65,8 @@ def main():
         render_chapters_step()
     elif step == "questions":
         render_questions_step()
+    elif step == "format":
+        render_format_step()
     elif step == "context":
         render_context_step()
     elif step == "qc":
