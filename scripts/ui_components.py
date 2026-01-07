@@ -514,8 +514,8 @@ def render_questions_step():
     ch_num = ch["chapter_number"]
     ch_key = f"ch{ch_num}"
 
-    # Model selection and buttons
-    model_col, btn_col1, btn_col2 = st.columns([2, 2, 2])
+    # Model selection, workers, and buttons
+    model_col, workers_col, btn_col1, btn_col2 = st.columns([2, 1.5, 2, 2])
 
     with model_col:
         model_options = get_model_options()
@@ -524,6 +524,16 @@ def render_questions_step():
         if selected_model != st.session_state.selected_model:
             st.session_state.selected_model = selected_model
             save_settings()
+
+    with workers_col:
+        extract_workers = st.number_input(
+            "Parallel workers:",
+            min_value=1,
+            max_value=50,
+            value=10,
+            help="Number of chapters to extract in parallel. Tier 1: 5-10 | Tier 2+: 10-20",
+            key="extract_workers"
+        )
 
     # Helper function to extract a single chapter
     def extract_single_chapter(ch_idx: int, pages_with_lines: list, lines_with_images: list, on_progress=None):
@@ -613,7 +623,7 @@ def render_questions_step():
 
             model_id = get_selected_model_id()
             total_chapters = len(st.session_state.chapters)
-            max_workers = min(4, total_chapters)  # Limit parallel workers
+            max_workers = min(extract_workers, total_chapters)
 
             # Prepare text with line numbers and image markers
             status_text.text("Preparing text with line numbers and image markers...")
