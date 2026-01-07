@@ -731,12 +731,27 @@ def find_page_for_text(search_text: str, pages: list[dict], start_page: int = 1,
             continue
 
         # Normalize page text for comparison
-        page_text_normalized = " ".join(page_dict["text"].lower().split())
+        page_text_normalized = normalize_quotes(" ".join(page_dict["text"].lower().split()))
 
         if search_normalized in page_text_normalized:
             return page_num
 
     return None
+
+
+def normalize_quotes(text: str) -> str:
+    """Normalize various quote characters to ASCII equivalents for matching."""
+    replacements = {
+        '\u2018': "'",  # LEFT SINGLE QUOTATION MARK
+        '\u2019': "'",  # RIGHT SINGLE QUOTATION MARK
+        '\u201C': '"',  # LEFT DOUBLE QUOTATION MARK
+        '\u201D': '"',  # RIGHT DOUBLE QUOTATION MARK
+        '\u2013': '-',  # EN DASH
+        '\u2014': '-',  # EM DASH
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
 
 
 def find_pages_for_text(search_text: str, pages: list[dict], start_page: int = 1, end_page: Optional[int] = None) -> list[int]:
@@ -757,9 +772,9 @@ def find_pages_for_text(search_text: str, pages: list[dict], start_page: int = 1
         return []
 
     # Find page where text starts (first 80 chars)
-    start_text = " ".join(search_text[:80].lower().split())
+    start_text = normalize_quotes(" ".join(search_text[:80].lower().split()))
     # Find page where text ends (last 80 chars)
-    end_text = " ".join(search_text[-80:].lower().split()) if len(search_text) > 80 else start_text
+    end_text = normalize_quotes(" ".join(search_text[-80:].lower().split())) if len(search_text) > 80 else start_text
 
     first_page = None
     last_page = None
@@ -773,7 +788,7 @@ def find_pages_for_text(search_text: str, pages: list[dict], start_page: int = 1
         if end_page is not None and page_num >= end_page:
             continue
 
-        page_text_normalized = " ".join(page_dict["text"].lower().split())
+        page_text_normalized = normalize_quotes(" ".join(page_dict["text"].lower().split()))
 
         # Check for start of text
         if first_page is None and start_text in page_text_normalized:
