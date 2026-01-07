@@ -779,8 +779,8 @@ def find_pages_for_text(search_text: str, pages: list[dict], start_page: int = 1
         if first_page is None and start_text in page_text_normalized:
             first_page = page_num
 
-        # Check for end of text
-        if end_text in page_text_normalized:
+        # Check for end of text (only on pages >= first_page, stop at first match)
+        if first_page is not None and last_page is None and end_text in page_text_normalized:
             last_page = page_num
 
     if first_page is None:
