@@ -396,7 +396,7 @@ def build_chapter_text_with_lines(
             # Image markers don't get line numbers
             output_lines.append(line)
         else:
-            output_lines.append(f"[LINE:{global_line_num:04d}] {line}")
+            output_lines.append(f"[LINE:{global_line_num:06d}] {line}")
             line_mapping[global_line_num] = i
             global_line_num += 1
 

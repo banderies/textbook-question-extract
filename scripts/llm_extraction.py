@@ -94,8 +94,72 @@ def reset_logger():
 # Characters per token ratio (conservative estimate for English text)
 CHARS_PER_TOKEN = 3.5
 
-# Maximum output tokens for extraction
-MAX_OUTPUT_TOKENS = 16000
+# Default max output tokens (fallback if API query fails)
+DEFAULT_MAX_OUTPUT_TOKENS = 64000
+
+# Cache for model max tokens
+_model_max_tokens_cache: dict = {}
+
+
+def stream_message(
+    client,
+    model_id: str,
+    messages: list[dict],
+    max_tokens: int = None,
+    on_token: callable = None
+) -> tuple[str, dict]:
+    """
+    Stream a message from the Anthropic API.
+
+    Args:
+        client: Anthropic client
+        model_id: Model ID to use
+        messages: List of message dicts
+        max_tokens: Max output tokens (defaults to model max)
+        on_token: Optional callback called with each token chunk for progress
+
+    Returns:
+        Tuple of (response_text, usage_dict)
+        usage_dict contains: input_tokens, output_tokens, stop_reason
+    """
+    if max_tokens is None:
+        max_tokens = get_model_max_tokens(model_id)
+
+    response_text = ""
+    input_tokens = 0
+    output_tokens = 0
+    stop_reason = None
+
+    with client.messages.stream(
+        model=model_id,
+        max_tokens=max_tokens,
+        messages=messages
+    ) as stream:
+        for event in stream:
+            # Handle different event types
+            if hasattr(event, 'type'):
+                if event.type == 'message_start':
+                    if hasattr(event, 'message') and hasattr(event.message, 'usage'):
+                        input_tokens = event.message.usage.input_tokens
+                elif event.type == 'content_block_delta':
+                    if hasattr(event, 'delta') and hasattr(event.delta, 'text'):
+                        chunk = event.delta.text
+                        response_text += chunk
+                        if on_token:
+                            on_token(chunk)
+                elif event.type == 'message_delta':
+                    if hasattr(event, 'usage'):
+                        output_tokens = event.usage.output_tokens
+                    if hasattr(event, 'delta') and hasattr(event.delta, 'stop_reason'):
+                        stop_reason = event.delta.stop_reason
+
+    usage = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "stop_reason": stop_reason
+    }
+
+    return response_text, usage
 
 # Maximum chapter size in characters before chunking is required.
 # This is based on OUTPUT constraints, not input context limits.
@@ -162,17 +226,17 @@ def extract_line_ranges_llm(
     prompt = get_prompt("extract_line_ranges", chapter_text=chapter_text)
 
     try:
-        logger.debug(f"{log_prefix}: Calling API with model {model_id}")
+        logger.debug(f"{log_prefix}: Calling API (streaming) with model {model_id}")
 
-        response = client.messages.create(
-            model=model_id,
-            max_tokens=8000,  # Much smaller - just line numbers
+        response_text, usage = stream_message(
+            client,
+            model_id,
             messages=[{"role": "user", "content": prompt}]
         )
 
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        stop_reason = response.stop_reason
+        input_tokens = usage["input_tokens"]
+        output_tokens = usage["output_tokens"]
+        stop_reason = usage["stop_reason"]
 
         logger.info(
             f"{log_prefix}: API response - "
@@ -181,8 +245,6 @@ def extract_line_ranges_llm(
 
         if stop_reason == "max_tokens":
             logger.warning(f"{log_prefix}: Response may be truncated (max_tokens reached)")
-
-        response_text = response.content[0].text
 
         # Extract JSON from markdown code blocks if present
         if "```" in response_text:
@@ -250,7 +312,7 @@ def format_qa_pair_llm(
         try:
             response = client.messages.create(
                 model=model_id,
-                max_tokens=2000,  # Each Q&A is small
+                max_tokens=get_model_max_tokens(model_id),
                 messages=[{"role": "user", "content": prompt}]
             )
 
@@ -465,11 +527,12 @@ def save_prompts(prompts: dict):
 FALLBACK_MODELS = {
     "claude-opus-4-5-20251101": "Claude Opus 4.5",
     "claude-sonnet-4-20250514": "Claude Sonnet 4",
+    "claude-haiku-4-5-20251218": "Claude Haiku 4.5",
     "claude-3-5-sonnet-20241022": "Claude Sonnet 3.5",
     "claude-3-5-haiku-20241022": "Claude Haiku 3.5",
 }
-DEFAULT_MODEL_ID = "claude-3-5-haiku-20241022"
-DEFAULT_MODEL_NAME = "Claude Haiku 3.5"
+DEFAULT_MODEL_ID = "claude-haiku-4-5-20251218"
+DEFAULT_MODEL_NAME = "Claude Haiku 4.5"
 
 _cached_models = None
 
@@ -534,6 +597,33 @@ def get_model_id(display_name: str) -> str:
     return models.get(display_name, DEFAULT_MODEL_ID)
 
 
+def get_model_max_tokens(model_id: str) -> int:
+    """
+    Get the maximum output tokens for a model from the API.
+    Caches the result to avoid repeated API calls.
+    Falls back to DEFAULT_MAX_OUTPUT_TOKENS if API call fails.
+    """
+    global _model_max_tokens_cache
+
+    if model_id in _model_max_tokens_cache:
+        return _model_max_tokens_cache[model_id]
+
+    try:
+        client = get_anthropic_client()
+        if client:
+            model_info = client.models.retrieve(model_id)
+            max_tokens = getattr(model_info, 'max_tokens', None)
+            if max_tokens:
+                _model_max_tokens_cache[model_id] = max_tokens
+                return max_tokens
+    except Exception as e:
+        print(f"Failed to get max tokens for {model_id}: {e}")
+
+    # Fallback to default
+    _model_max_tokens_cache[model_id] = DEFAULT_MAX_OUTPUT_TOKENS
+    return DEFAULT_MAX_OUTPUT_TOKENS
+
+
 # =============================================================================
 # LLM Extraction Functions
 # =============================================================================
@@ -549,18 +639,17 @@ def identify_chapters_llm(client, pages: list[dict], model_id: str) -> list[dict
     prompt = get_prompt("identify_chapters", page_index=page_index)
 
     try:
-        response = client.messages.create(
-            model=model_id,
-            max_tokens=4096,
+        response_text, usage = stream_message(
+            client,
+            model_id,
             messages=[{"role": "user", "content": prompt}]
         )
 
         logger.info(
-            f"Chapter identification: input={response.usage.input_tokens:,}, "
-            f"output={response.usage.output_tokens:,}, stop={response.stop_reason}"
+            f"Chapter identification: input={usage['input_tokens']:,}, "
+            f"output={usage['output_tokens']:,}, stop={usage['stop_reason']}"
         )
 
-        response_text = response.content[0].text
         if "```" in response_text:
             match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
             if match:
@@ -717,18 +806,18 @@ def extract_qa_pairs_single(client, chapter_num: int, chapter_text: str, model_i
                        chapter_text=chapter_text)
 
     try:
-        logger.debug(f"{log_prefix}: Calling API with model {model_id}")
+        logger.debug(f"{log_prefix}: Calling API (streaming) with model {model_id}")
 
-        response = client.messages.create(
-            model=model_id,
-            max_tokens=MAX_OUTPUT_TOKENS,
+        response_text, usage = stream_message(
+            client,
+            model_id,
             messages=[{"role": "user", "content": prompt}]
         )
 
         # Log token usage
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        stop_reason = response.stop_reason
+        input_tokens = usage["input_tokens"]
+        output_tokens = usage["output_tokens"]
+        stop_reason = usage["stop_reason"]
 
         logger.info(
             f"{log_prefix}: API response - "
@@ -738,11 +827,9 @@ def extract_qa_pairs_single(client, chapter_num: int, chapter_text: str, model_i
         # Check for truncation
         if stop_reason == "max_tokens":
             logger.error(
-                f"{log_prefix}: Response truncated at max_tokens ({MAX_OUTPUT_TOKENS}). "
+                f"{log_prefix}: Response truncated at max_tokens ({get_model_max_tokens(model_id)}). "
                 f"Output may be incomplete!"
             )
-
-        response_text = response.content[0].text
 
         # Extract JSON from markdown code blocks if present
         if "```" in response_text:
@@ -933,18 +1020,16 @@ def match_images_to_questions_llm(client, images: list[dict], chapters: list[dic
                            images_text="\n".join(images_text))
 
         try:
-            response = client.messages.create(
-                model=model_id,
-                max_tokens=4096,
+            response_text, usage = stream_message(
+                client,
+                model_id,
                 messages=[{"role": "user", "content": prompt}]
             )
 
             logger.info(
-                f"Image matching Ch{ch_num}: input={response.usage.input_tokens:,}, "
-                f"output={response.usage.output_tokens:,}"
+                f"Image matching Ch{ch_num}: input={usage['input_tokens']:,}, "
+                f"output={usage['output_tokens']:,}"
             )
-
-            response_text = response.content[0].text
 
             if "```" in response_text:
                 match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
@@ -1006,13 +1091,11 @@ def postprocess_questions_llm(client, questions: dict, model_id: str) -> dict:
         prompt = get_prompt("postprocess_questions", questions_json=questions_json)
 
         try:
-            response = client.messages.create(
-                model=model_id,
-                max_tokens=16000,
+            response_text, usage = stream_message(
+                client,
+                model_id,
                 messages=[{"role": "user", "content": prompt}]
             )
-
-            response_text = response.content[0].text
 
             if "```" in response_text:
                 match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
@@ -1109,18 +1192,16 @@ def associate_context_llm(client, questions: dict, image_assignments: dict,
                            questions_summary=json.dumps(questions_summary, indent=2))
 
         try:
-            response = client.messages.create(
-                model=model_id,
-                max_tokens=4096,
+            response_text, usage = stream_message(
+                client,
+                model_id,
                 messages=[{"role": "user", "content": prompt}]
             )
 
             logger.info(
-                f"Context association {ch_key}: input={response.usage.input_tokens:,}, "
-                f"output={response.usage.output_tokens:,}"
+                f"Context association {ch_key}: input={usage['input_tokens']:,}, "
+                f"output={usage['output_tokens']:,}"
             )
-
-            response_text = response.content[0].text
 
             if "```" in response_text:
                 match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)

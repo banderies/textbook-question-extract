@@ -319,7 +319,7 @@ def render_source_step():
                         if line.startswith("[IMAGE:"):
                             numbered_lines.append(line)
                         else:
-                            numbered_lines.append(f"[LINE:{line_num:04d}] {line}")
+                            numbered_lines.append(f"[LINE:{line_num:06d}] {line}")
                             line_num += 1
 
                     full_text = "\n".join(numbered_lines)
