@@ -609,9 +609,11 @@ def render_questions_step():
         if st.button("Extract ALL Chapters"):
             progress_bar = st.progress(0)
             status_text = st.empty()
+            chapter_status = st.empty()
 
             model_id = get_selected_model_id()
             total_chapters = len(st.session_state.chapters)
+            max_workers = min(4, total_chapters)  # Limit parallel workers
 
             # Prepare text with line numbers and image markers
             status_text.text("Preparing text with line numbers and image markers...")
@@ -627,38 +629,39 @@ def render_questions_step():
             )
             logger.info(f"Prepared {len(lines_with_images)} lines with {len(st.session_state.images)} image markers")
 
-            # Process each chapter
+            # Precompute chapter data for all chapters
+            status_text.text("Preparing chapter data...")
+            chapter_data = []
             for i, ch in enumerate(st.session_state.chapters):
                 ch_num = ch["chapter_number"]
-                ch_key = f"ch{ch_num}"
-
-                # Progress callback for streaming
-                def make_progress_callback(chapter_num, chapter_idx, total):
-                    def update_progress(tokens, text):
-                        q_count = text.count('"question_id"')
-                        status_text.text(f"Chapter {chapter_num} ({chapter_idx+1}/{total}): {tokens} tokens, ~{q_count} questions...")
-                    return update_progress
-
-                status_text.text(f"Extracting Chapter {ch_num} ({i+1}/{total_chapters})...")
-
-                # Build chapter text with line numbers
                 start_page = ch["start_page"]
                 end_page = st.session_state.chapters[i + 1]["start_page"] if i + 1 < len(st.session_state.chapters) else None
                 ch_text, line_mapping = build_chapter_text_with_lines(
                     lines_with_images, pages_with_lines, start_page, end_page
                 )
+                chapter_data.append({
+                    "ch_num": ch_num,
+                    "ch_key": f"ch{ch_num}",
+                    "ch_text": ch_text,
+                    "line_mapping": line_mapping
+                })
 
-                # Call LLM to identify line ranges with streaming progress
-                progress_cb = make_progress_callback(ch_num, i, total_chapters)
-                line_ranges = extract_line_ranges_llm(client, ch_num, ch_text, model_id, on_progress=progress_cb)
+            # Worker function for parallel extraction
+            def extract_chapter_worker(ch_data: dict) -> tuple[str, list]:
+                """Extract a single chapter. Returns (ch_key, raw_questions)."""
+                ch_num = ch_data["ch_num"]
+                ch_key = ch_data["ch_key"]
+                ch_text = ch_data["ch_text"]
+                line_mapping = ch_data["line_mapping"]
+
+                line_ranges = extract_line_ranges_llm(
+                    get_anthropic_client(), ch_num, ch_text, model_id
+                )
 
                 if not line_ranges:
                     logger.warning(f"Chapter {ch_num}: No line ranges extracted")
-                    progress_bar.progress((i + 1) / total_chapters)
-                    continue
+                    return ch_key, []
 
-                # Extract raw text for each Q&A pair using line_mapping to translate
-                # chapter-relative line numbers to global array indices
                 raw_questions = []
                 for lr in line_ranges:
                     q_id = lr.get("question_id", "?")
@@ -667,8 +670,6 @@ def render_questions_step():
                     a_start = lr.get("answer_start", 0)
                     a_end = lr.get("answer_end", 0)
 
-                    # Use line_mapping to get correct global indices
-                    # extract_lines_by_range_mapped handles the translation
                     q_text = extract_lines_by_range_mapped(lines_with_images, q_start, q_end, line_mapping) if q_start > 0 else ""
                     a_text = extract_lines_by_range_mapped(lines_with_images, a_start, a_end, line_mapping) if a_start > 0 else ""
 
@@ -686,15 +687,61 @@ def render_questions_step():
                         "answer_text": a_text
                     })
 
-                st.session_state.raw_questions[ch_key] = raw_questions
                 logger.info(f"Chapter {ch_num}: Extracted {len(raw_questions)} raw Q&A pairs")
+                return ch_key, raw_questions
 
-                progress_bar.progress((i + 1) / total_chapters)
+            # Extract chapters in parallel
+            status_text.text(f"Extracting {total_chapters} chapters with {max_workers} parallel workers...")
+            completed = 0
+            in_progress = set()
+            results = {}
 
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all chapter extraction tasks
+                future_to_ch = {
+                    executor.submit(extract_chapter_worker, ch_data): ch_data["ch_num"]
+                    for ch_data in chapter_data
+                }
+
+                # Track in-progress chapters
+                for ch_data in chapter_data[:max_workers]:
+                    in_progress.add(ch_data["ch_num"])
+                chapter_status.text(f"In progress: Ch {', Ch '.join(map(str, sorted(in_progress)))}")
+
+                # Process completed futures as they finish
+                for future in as_completed(future_to_ch):
+                    ch_num = future_to_ch[future]
+                    try:
+                        ch_key, raw_questions = future.result()
+                        results[ch_key] = raw_questions
+                    except Exception as e:
+                        logger.error(f"Chapter {ch_num}: Extraction failed - {e}")
+                        results[f"ch{ch_num}"] = []
+
+                    completed += 1
+                    in_progress.discard(ch_num)
+
+                    # Add next chapter to in-progress set
+                    if completed + len(in_progress) <= total_chapters:
+                        for ch_data in chapter_data:
+                            if ch_data["ch_num"] not in in_progress and f"ch{ch_data['ch_num']}" not in results:
+                                in_progress.add(ch_data["ch_num"])
+                                break
+
+                    progress_bar.progress(completed / total_chapters)
+                    status_text.text(f"Completed {completed}/{total_chapters} chapters...")
+                    if in_progress:
+                        chapter_status.text(f"In progress: Ch {', Ch '.join(map(str, sorted(in_progress)))}")
+                    else:
+                        chapter_status.empty()
+
+            # Store results
+            st.session_state.raw_questions = results
             save_raw_questions()
             status_text.text("Done!")
+            chapter_status.empty()
 
-            total_raw = sum(len(qs) for qs in st.session_state.raw_questions.values())
+            total_raw = sum(len(qs) for qs in results.values())
             st.success(f"Extracted {total_raw} raw Q&A pairs from {total_chapters} chapters")
             st.info("**Next:** Go to **Step 4: Format Questions** to format the raw Q&A pairs.")
             st.rerun()
