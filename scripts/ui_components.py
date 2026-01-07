@@ -726,6 +726,9 @@ def render_questions_step():
                     try:
                         ch_key, raw_questions = future.result()
                         results[ch_key] = raw_questions
+                        # Save incrementally after each chapter completes
+                        st.session_state.raw_questions[ch_key] = raw_questions
+                        save_raw_questions()
                     except Exception as e:
                         logger.error(f"Chapter {ch_num}: Extraction failed - {e}")
                         results[f"ch{ch_num}"] = []
@@ -747,7 +750,7 @@ def render_questions_step():
                     else:
                         chapter_status.empty()
 
-            # Store results
+            # Final save (in case session state differs from results)
             st.session_state.raw_questions = results
             save_raw_questions()
             status_text.text("Done!")
@@ -924,6 +927,11 @@ def render_format_step():
                     completed += 1
                     progress_bar.progress(completed / total)
                     status_text.text(f"Formatted {completed}/{total} Q&A pairs...")
+
+                    # Save incrementally every 10 questions
+                    if completed % 10 == 0:
+                        st.session_state.questions = formatted_by_chapter
+                        save_questions()
 
             # Sort questions within each chapter
             for ch_key in formatted_by_chapter:
@@ -1309,6 +1317,9 @@ def render_context_step():
                             updated_questions[result_ch_key] = result_questions
                             for key in total_stats:
                                 total_stats[key] += ch_stats[key]
+                            # Save incrementally after each chapter completes
+                            st.session_state.questions_merged[result_ch_key] = result_questions
+                            save_questions_merged()
                         except Exception as e:
                             logger.error(f"Context association {ch_key}: Failed - {e}")
                             updated_questions[ch_key] = questions_copy[ch_key]
@@ -1329,7 +1340,7 @@ def render_context_step():
                         else:
                             chapter_status.empty()
 
-                status_text.text("Saving merged data...")
+                status_text.text("Saving final merged data...")
 
                 st.session_state.questions_merged = updated_questions
                 st.session_state.image_assignments_merged = assignments_copy
