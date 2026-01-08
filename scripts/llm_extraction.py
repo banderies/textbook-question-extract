@@ -284,6 +284,40 @@ def extract_line_ranges_llm(
         return []
 
 
+def repair_json(text: str) -> str:
+    """
+    Attempt to repair common JSON syntax errors from LLM output.
+
+    Handles:
+    - Unescaped quotes inside strings
+    - Control characters
+    - Trailing commas
+    """
+    # Remove control characters except newlines and tabs
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
+
+    # Try to fix unescaped quotes inside string values
+    # This is a heuristic approach - find strings and escape internal quotes
+    def escape_internal_quotes(match):
+        content = match.group(1)
+        # Escape any unescaped quotes (quotes not preceded by backslash)
+        fixed = re.sub(r'(?<!\\)"', r'\\"', content)
+        return f'"{fixed}"'
+
+    # Match string values after colons (JSON object values)
+    # This pattern looks for ": " followed by a quoted string
+    text = re.sub(
+        r'(?<=:\s)"((?:[^"\\]|\\.)*)(?<!\\)"(?=\s*[,}\]])',
+        escape_internal_quotes,
+        text
+    )
+
+    # Remove trailing commas before } or ]
+    text = re.sub(r',(\s*[}\]])', r'\1', text)
+
+    return text
+
+
 def format_qa_pair_llm(
     client,
     question_id: str,
@@ -343,7 +377,19 @@ def format_qa_pair_llm(
                 if match:
                     response_text = match.group(1)
 
-            return json.loads(response_text)
+            # Try parsing JSON, with repair attempt on failure
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError:
+                # Try to repair and parse again
+                repaired = repair_json(response_text)
+                try:
+                    result = json.loads(repaired)
+                    logger.info(f"{log_prefix}: JSON repaired successfully")
+                    return result
+                except json.JSONDecodeError:
+                    # Re-raise original error for logging
+                    raise
 
         except anthropic.RateLimitError as e:
             if attempt < max_retries:
