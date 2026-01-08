@@ -205,17 +205,24 @@ extract_line_ranges:
     - ANSWERS section: Contains explanations starting with "Answer X." where X is the correct letter
     - Questions and answers are in the same order (Question 1 matches Answer 1, etc.)
 
+    CRITICAL - IMAGES AND CHOICES:
+    - Images appear BETWEEN the question text and the answer choices
+    - The typical structure is: Question text → [IMAGE] → A. choice → B. choice → C. choice → D. choice
+    - You MUST include the answer choices (A/B/C/D) in question_end, even when an image appears before them
+    - question_end should be the line number of the LAST choice (D or E), NOT the line before the image
+
     MULTI-PART QUESTIONS:
     - Some questions have a context (e.g., "1") followed by sub-questions (e.g., "1a", "1b", "1c")
-    - The context has no answer choices - it's just a clinical scenario
+    - The context has no answer choices - it's just a clinical scenario with NO A/B/C/D options
     - Each sub-question has its own answer in the ANSWERS section
     - Extract the context as a separate entry with empty answer_start/answer_end
+    - IMPORTANT: A question with choices (A/B/C/D) is NOT context-only, even if it has an image
 
-    For EACH question (including context-only questions), output:
+    For EACH question, output:
     - question_id: The question number as it appears (e.g., "1", "1a", "2b", "15")
     - question_start: Line number where question text begins
-    - question_end: Line number where question ends (after last choice if present)
-    - answer_start: Line number where answer/explanation begins (0 if no answer, e.g., for context questions)
+    - question_end: Line number of the LAST answer choice (D or E line), or last line of question text if no choices
+    - answer_start: Line number where answer/explanation begins (0 if no answer)
     - answer_end: Line number where answer ends (0 if no answer)
     - correct_letter: The correct answer letter (A/B/C/D/E), or "" for context questions
     - image_files: Array of image filenames that appear within this question's line range
@@ -225,18 +232,18 @@ extract_line_ranges:
       {{
         "question_id": "1",
         "question_start": 5,
-        "question_end": 8,
-        "answer_start": 0,
-        "answer_end": 0,
-        "correct_letter": "",
+        "question_end": 12,
+        "answer_start": 450,
+        "answer_end": 460,
+        "correct_letter": "B",
         "image_files": ["p014_y0321_x0172_0.jpeg"]
       }},
       {{
-        "question_id": "1a",
-        "question_start": 9,
-        "question_end": 15,
-        "answer_start": 450,
-        "answer_end": 465,
+        "question_id": "2",
+        "question_start": 13,
+        "question_end": 18,
+        "answer_start": 461,
+        "answer_end": 475,
         "correct_letter": "A",
         "image_files": []
       }},

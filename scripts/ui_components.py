@@ -1822,12 +1822,56 @@ def render_context_step():
                 if not q.get("choices"):
                     potential_context.append((ch_key, q))
 
-        with st.expander(f"Preview Potential Context Questions ({len(potential_context)} without answer choices)", expanded=False):
-            for ch_key, q in potential_context:
-                q_text = q.get("text", "")[:150]
-                if len(q.get("text", "")) > 150:
-                    q_text += "..."
-                st.markdown(f"**{q['full_id']}**: {q_text}")
+        st.subheader(f"Context-Only Questions Preview ({len(potential_context)} questions)")
+
+        # Chapter filter for context questions
+        context_chapters = sorted(set(ch_key for ch_key, _ in potential_context),
+                                  key=lambda x: int(x.replace("ch", "")))
+        filter_col1, filter_col2 = st.columns([1, 3])
+        with filter_col1:
+            ctx_chapter_filter = st.selectbox(
+                "Filter by chapter:",
+                ["All chapters"] + context_chapters,
+                key="ctx_preview_chapter_filter"
+            )
+
+        # Filter questions by chapter
+        filtered_context = [(ch, q) for ch, q in potential_context
+                           if ctx_chapter_filter == "All chapters" or ch == ctx_chapter_filter]
+
+        st.caption(f"Showing {len(filtered_context)} of {len(potential_context)} context questions")
+
+        # Display each context question in a card-like format
+        for idx, (ch_key, q) in enumerate(filtered_context):
+            # Get images assigned to this question
+            q_images = [img for img in st.session_state.images
+                       if st.session_state.image_assignments.get(img["filename"]) == q["full_id"]]
+
+            # Card container
+            with st.container():
+                img_indicator = f" [{len(q_images)} img]" if q_images else ""
+
+                with st.expander(f"**{q['full_id']}**{img_indicator}", expanded=True):
+                    col1, col2 = st.columns([2, 1])
+
+                    with col1:
+                        st.markdown(f"**Question Text:**")
+                        st.markdown(q.get("text", "No text"))
+
+                        # Show potential sub-questions that would inherit this context
+                        q_id = q.get("local_id", "")
+                        sub_questions = [sq for sq in st.session_state.questions.get(ch_key, [])
+                                        if sq.get("local_id", "").startswith(q_id) and sq.get("local_id") != q_id]
+                        if sub_questions:
+                            st.markdown(f"**Sub-questions:** {', '.join(sq.get('local_id', '?') for sq in sub_questions)}")
+
+                    with col2:
+                        if q_images:
+                            for img in q_images:
+                                if os.path.exists(img["filepath"]):
+                                    st.image(img["filepath"], caption=f"Page {img['page']}", use_column_width=True)
+                        else:
+                            st.caption("No images assigned")
 
     st.markdown("---")
 
@@ -1853,7 +1897,7 @@ def render_context_step():
                 key="context_chapter_filter"
             )
 
-        # Context-only questions preview expander
+        # Context-only questions preview section
         context_only_questions = []
         for ch_key in sort_chapter_keys(st.session_state.questions_merged.keys()):
             for q in st.session_state.questions_merged[ch_key]:
@@ -1861,12 +1905,44 @@ def render_context_step():
                     context_only_questions.append((ch_key, q))
 
         if context_only_questions:
-            with st.expander(f"Preview Context-Only Questions ({len(context_only_questions)} total)", expanded=False):
-                for ch_key, q in context_only_questions:
-                    q_text = q.get("question", "")[:150]
-                    if len(q.get("question", "")) > 150:
-                        q_text += "..."
-                    st.markdown(f"**{q['full_id']}**: {q_text}")
+            with st.expander(f"Context-Only Questions ({len(context_only_questions)} total) - These will NOT become Anki cards", expanded=False):
+                assignments_merged = st.session_state.image_assignments_merged if st.session_state.image_assignments_merged else st.session_state.image_assignments
+
+                # Chapter filter for context-only
+                ctx_merged_chapters = sorted(set(ch for ch, _ in context_only_questions),
+                                            key=lambda x: int(x.replace("ch", "")))
+                ctx_filter = st.selectbox(
+                    "Filter:",
+                    ["All chapters"] + ctx_merged_chapters,
+                    key="ctx_merged_filter"
+                )
+
+                filtered_ctx = [(ch, q) for ch, q in context_only_questions
+                               if ctx_filter == "All chapters" or ch == ctx_filter]
+
+                for ch_key, q in filtered_ctx:
+                    q_images = [img for img in st.session_state.images
+                               if assignments_merged.get(img["filename"]) == q["full_id"]]
+
+                    img_indicator = f" [{len(q_images)} img]" if q_images else ""
+
+                    with st.expander(f"**{q['full_id']}**{img_indicator}", expanded=False):
+                        col1, col2 = st.columns([2, 1])
+
+                        with col1:
+                            st.markdown(q.get("text", "No text"))
+
+                            # Show which sub-questions inherited this context
+                            inherited_by = [sq["local_id"] for sq in st.session_state.questions_merged.get(ch_key, [])
+                                           if sq.get("context_from") == q["full_id"]]
+                            if inherited_by:
+                                st.success(f"Context inherited by: {', '.join(inherited_by)}")
+
+                        with col2:
+                            if q_images:
+                                for img in q_images:
+                                    if os.path.exists(img["filepath"]):
+                                        st.image(img["filepath"], caption=f"Page {img['page']}", use_column_width=True)
 
         st.subheader("Merged Questions Preview")
 
