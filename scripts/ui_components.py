@@ -1895,9 +1895,16 @@ def render_context_step():
                     st.markdown(q.get("text", "No text"))
 
                     # Show potential sub-questions that would inherit this context
+                    # A sub-question of "1" is "1a", "1b", etc. (NOT "10", "11")
+                    # The character immediately after the context ID must be a letter
                     q_id = q.get("local_id", "")
-                    sub_questions = [sq for sq in st.session_state.questions.get(ch_key, [])
-                                    if sq.get("local_id", "").startswith(q_id) and sq.get("local_id") != q_id]
+                    sub_questions = []
+                    for sq in st.session_state.questions.get(ch_key, []):
+                        sq_id = sq.get("local_id", "")
+                        if (sq_id.startswith(q_id) and
+                            len(sq_id) > len(q_id) and
+                            sq_id[len(q_id)].isalpha()):
+                            sub_questions.append(sq)
                     if sub_questions:
                         st.markdown(f"**Sub-questions:** {', '.join(sq.get('local_id', '?') for sq in sub_questions)}")
 
