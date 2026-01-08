@@ -2888,10 +2888,15 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             local_id = q.get('local_id', q_id.split('_')[-1])
             source_parts = [f'<span class="source-ref-label">Source:</span> Chapter {ch_num} ({ch_title}), Question {local_id}']
 
-            # Add page number if available
+            # Add page numbers if available
             question_page = q.get('question_page')
-            if question_page:
+            answer_page = q.get('answer_page')
+            if question_page and answer_page:
+                source_parts.append(f'(Q: p.{question_page}, A: p.{answer_page})')
+            elif question_page:
                 source_parts.append(f'(p. {question_page})')
+            elif answer_page:
+                source_parts.append(f'(A: p.{answer_page})')
 
             if q.get('context_from'):
                 context_local_id = q['context_from'].split('_')[-1]
@@ -3003,11 +3008,15 @@ def render_export_step():
 
         with st.spinner("Generating Anki deck..."):
             try:
+                # Use merged questions/assignments if available (includes context in text)
+                questions_to_export = st.session_state.questions_merged if st.session_state.questions_merged else st.session_state.questions
+                assignments_to_export = st.session_state.image_assignments_merged if st.session_state.image_assignments_merged else st.session_state.image_assignments
+
                 output_path = generate_anki_deck(
                     book_name=book_name.strip(),
-                    questions=st.session_state.questions,
+                    questions=questions_to_export,
                     chapters=st.session_state.chapters or [],
-                    image_assignments=st.session_state.image_assignments,
+                    image_assignments=assignments_to_export,
                     images=st.session_state.images,
                     include_images=include_images,
                     only_approved=only_approved,
