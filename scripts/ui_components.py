@@ -1859,56 +1859,55 @@ def render_context_step():
                 if not q.get("choices"):
                     potential_context.append((ch_key, q))
 
-        st.subheader(f"Context-Only Questions Preview ({len(potential_context)} questions)")
+        with st.expander(f"Context-Only Questions Preview ({len(potential_context)} questions)", expanded=False):
+            # Chapter filter for context questions
+            context_chapters = sorted(set(ch_key for ch_key, _ in potential_context),
+                                      key=lambda x: int(x.replace("ch", "")))
+            filter_col1, filter_col2 = st.columns([1, 3])
+            with filter_col1:
+                ctx_chapter_filter = st.selectbox(
+                    "Filter by chapter:",
+                    ["All chapters"] + context_chapters,
+                    key="ctx_preview_chapter_filter"
+                )
 
-        # Chapter filter for context questions
-        context_chapters = sorted(set(ch_key for ch_key, _ in potential_context),
-                                  key=lambda x: int(x.replace("ch", "")))
-        filter_col1, filter_col2 = st.columns([1, 3])
-        with filter_col1:
-            ctx_chapter_filter = st.selectbox(
-                "Filter by chapter:",
-                ["All chapters"] + context_chapters,
-                key="ctx_preview_chapter_filter"
-            )
+            # Filter questions by chapter
+            filtered_context = [(ch, q) for ch, q in potential_context
+                               if ctx_chapter_filter == "All chapters" or ch == ctx_chapter_filter]
 
-        # Filter questions by chapter
-        filtered_context = [(ch, q) for ch, q in potential_context
-                           if ctx_chapter_filter == "All chapters" or ch == ctx_chapter_filter]
+            st.caption(f"Showing {len(filtered_context)} of {len(potential_context)} context questions")
 
-        st.caption(f"Showing {len(filtered_context)} of {len(potential_context)} context questions")
+            # Display each context question in a card-like format
+            for idx, (ch_key, q) in enumerate(filtered_context):
+                # Get images assigned to this question
+                q_images = [img for img in st.session_state.images
+                           if st.session_state.image_assignments.get(img["filename"]) == q["full_id"]]
 
-        # Display each context question in a card-like format
-        for idx, (ch_key, q) in enumerate(filtered_context):
-            # Get images assigned to this question
-            q_images = [img for img in st.session_state.images
-                       if st.session_state.image_assignments.get(img["filename"]) == q["full_id"]]
-
-            # Card container
-            with st.container():
+                # Card container - use divider and container instead of nested expander
+                st.markdown("---")
                 img_indicator = f" [{len(q_images)} img]" if q_images else ""
+                st.markdown(f"**{q['full_id']}**{img_indicator}")
 
-                with st.expander(f"**{q['full_id']}**{img_indicator}", expanded=True):
-                    col1, col2 = st.columns([2, 1])
+                col1, col2 = st.columns([2, 1])
 
-                    with col1:
-                        st.markdown(f"**Question Text:**")
-                        st.markdown(q.get("text", "No text"))
+                with col1:
+                    st.markdown(f"**Question Text:**")
+                    st.markdown(q.get("text", "No text"))
 
-                        # Show potential sub-questions that would inherit this context
-                        q_id = q.get("local_id", "")
-                        sub_questions = [sq for sq in st.session_state.questions.get(ch_key, [])
-                                        if sq.get("local_id", "").startswith(q_id) and sq.get("local_id") != q_id]
-                        if sub_questions:
-                            st.markdown(f"**Sub-questions:** {', '.join(sq.get('local_id', '?') for sq in sub_questions)}")
+                    # Show potential sub-questions that would inherit this context
+                    q_id = q.get("local_id", "")
+                    sub_questions = [sq for sq in st.session_state.questions.get(ch_key, [])
+                                    if sq.get("local_id", "").startswith(q_id) and sq.get("local_id") != q_id]
+                    if sub_questions:
+                        st.markdown(f"**Sub-questions:** {', '.join(sq.get('local_id', '?') for sq in sub_questions)}")
 
-                    with col2:
-                        if q_images:
-                            for img in q_images:
-                                if os.path.exists(img["filepath"]):
-                                    st.image(img["filepath"], caption=f"Page {img['page']}", use_column_width=True)
-                        else:
-                            st.caption("No images assigned")
+                with col2:
+                    if q_images:
+                        for img in q_images:
+                            if os.path.exists(img["filepath"]):
+                                st.image(img["filepath"], caption=f"Page {img['page']}", use_column_width=True)
+                    else:
+                        st.caption("No images assigned")
 
     st.markdown("---")
 
