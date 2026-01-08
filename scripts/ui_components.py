@@ -2474,12 +2474,21 @@ def render_qc_step():
             with col5:
                 if st.button("Detect Pages", help="Detect PDF pages for each question"):
                     with st.spinner("Detecting page numbers..."):
+                        # Detect pages for original questions
                         add_page_numbers_to_questions(
                             st.session_state.questions,
                             st.session_state.pages,
                             st.session_state.chapters
                         )
                         save_questions()
+                        # Also detect pages for merged questions if they exist
+                        if st.session_state.questions_merged:
+                            add_page_numbers_to_questions(
+                                st.session_state.questions_merged,
+                                st.session_state.pages,
+                                st.session_state.chapters
+                            )
+                            save_questions_merged()
                         st.rerun()
 
             with col6:
@@ -2627,6 +2636,14 @@ def render_qc_step():
                                     st.session_state.chapters
                                 )
                                 save_questions()
+                                # Also detect for merged questions
+                                if st.session_state.questions_merged:
+                                    add_page_numbers_to_questions(
+                                        st.session_state.questions_merged,
+                                        st.session_state.pages,
+                                        st.session_state.chapters
+                                    )
+                                    save_questions_merged()
                                 st.rerun()
                     else:
                         # Show question pages and answer pages side by side
@@ -2755,6 +2772,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                 margin: 10px 0;
                 padding: 10px 14px;
                 background: #ffffff;
+                color: #2c3e50;
                 border-radius: 6px;
                 border: 1px solid #e1e5e9;
                 border-left: 4px solid #3498db;
@@ -2787,7 +2805,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                 border-radius: 8px;
                 border: 1px solid #e1e5e9;
                 line-height: 1.7;
-                color: #34495e;
+                color: #34495e !important;
             }
             .source-ref {
                 margin-top: 20px;
@@ -2795,12 +2813,12 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                 background: #f8f9fa;
                 border-radius: 6px;
                 font-size: 13px;
-                color: #6c757d;
+                color: #6c757d !important;
                 text-align: left;
             }
             .source-ref-label {
                 font-weight: 600;
-                color: #495057;
+                color: #495057 !important;
             }
         '''
     )
