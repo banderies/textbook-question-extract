@@ -2673,6 +2673,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             {'name': 'Explanation'},
             {'name': 'Image'},
             {'name': 'Chapter'},
+            {'name': 'Source'},
         ],
         templates=[
             {
@@ -2692,6 +2693,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                         <hr class="answer-divider">
                         <div class="answer">{{Answer}}</div>
                         <div class="explanation">{{Explanation}}</div>
+                        {{#Source}}<div class="source-ref">{{Source}}</div>{{/Source}}
                     </div>
                 ''',
             },
@@ -2767,6 +2769,19 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                 border: 1px solid #e1e5e9;
                 line-height: 1.7;
                 color: #34495e;
+            }
+            .source-ref {
+                margin-top: 20px;
+                padding: 10px 14px;
+                background: #f8f9fa;
+                border-radius: 6px;
+                font-size: 13px;
+                color: #6c757d;
+                text-align: left;
+            }
+            .source-ref-label {
+                font-weight: 600;
+                color: #495057;
             }
         '''
     )
@@ -2850,10 +2865,18 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                             media_files.append(filepath)
                             image_html += f'<img src="{img_fname}">'
 
+            # Build source reference
+            local_id = q.get('local_id', q_id.split('_')[-1])
+            source_parts = [f'<span class="source-ref-label">Source:</span> Chapter {ch_num} ({ch_title}), Question {local_id}']
+            if q.get('context_from'):
+                context_local_id = q['context_from'].split('_')[-1]
+                source_parts.append(f'(includes context from Q{context_local_id})')
+            source_ref = ' '.join(source_parts)
+
             # Create note
             note = genanki.Note(
                 model=model,
-                fields=[q_text, choices_html, correct, explanation, image_html, ch_title],
+                fields=[q_text, choices_html, correct, explanation, image_html, ch_title, source_ref],
                 tags=[f"chapter{ch_num}"]
             )
             ch_deck.notes.append(note)
