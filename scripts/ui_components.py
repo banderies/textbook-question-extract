@@ -2678,26 +2678,96 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             {
                 'name': 'Card 1',
                 'qfmt': '''
-                    <div class="question">{{Question}}</div>
-                    {{#Image}}<div class="image">{{Image}}</div>{{/Image}}
-                    <div class="choices">{{Choices}}</div>
+                    <div class="card-content">
+                        <div class="question">{{Question}}</div>
+                        {{#Image}}<div class="image">{{Image}}</div>{{/Image}}
+                        <div class="choices">{{Choices}}</div>
+                    </div>
                 ''',
                 'afmt': '''
-                    {{FrontSide}}
-                    <hr id="answer">
-                    <div class="answer"><b>Answer:</b> {{Answer}}</div>
-                    <div class="explanation">{{Explanation}}</div>
+                    <div class="card-content">
+                        <div class="question">{{Question}}</div>
+                        {{#Image}}<div class="image">{{Image}}</div>{{/Image}}
+                        <div class="choices">{{Choices}}</div>
+                        <hr class="answer-divider">
+                        <div class="answer">{{Answer}}</div>
+                        <div class="explanation">{{Explanation}}</div>
+                    </div>
                 ''',
             },
         ],
         css='''
-            .card { font-family: arial; font-size: 16px; text-align: left; }
-            .question { font-weight: bold; margin-bottom: 10px; }
-            .choices { margin: 10px 0; }
-            .answer { color: green; font-weight: bold; margin: 10px 0; }
-            .explanation { margin-top: 10px; font-style: italic; }
-            .image { margin: 10px 0; }
-            .image img { max-width: 100%; height: auto; }
+            .card {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                font-size: 17px;
+                line-height: 1.5;
+                color: #2c3e50;
+                background: #fafafa;
+            }
+            .card-content {
+                max-width: 650px;
+                margin: 0 auto;
+                padding: 25px;
+                text-align: center;
+            }
+            .question {
+                font-size: 18px;
+                font-weight: 500;
+                margin-bottom: 20px;
+                text-align: left;
+                line-height: 1.6;
+            }
+            .image {
+                margin: 20px 0;
+            }
+            .image img {
+                max-width: 100%;
+                height: auto;
+                border-radius: 8px;
+                box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+            }
+            .choices {
+                text-align: left;
+                margin: 20px 0;
+            }
+            .choice {
+                margin: 10px 0;
+                padding: 10px 14px;
+                background: #ffffff;
+                border-radius: 6px;
+                border: 1px solid #e1e5e9;
+                border-left: 4px solid #3498db;
+            }
+            .choice-letter {
+                font-weight: 700;
+                color: #3498db;
+                margin-right: 10px;
+            }
+            .answer-divider {
+                border: none;
+                border-top: 2px solid #e1e5e9;
+                margin: 25px 0;
+            }
+            .answer {
+                font-size: 20px;
+                font-weight: 600;
+                color: #27ae60;
+                margin: 20px 0;
+                padding: 12px 20px;
+                background: linear-gradient(135deg, #d5f4e0 0%, #c8f0d8 100%);
+                border-radius: 8px;
+                display: inline-block;
+            }
+            .explanation {
+                text-align: left;
+                margin-top: 20px;
+                padding: 18px;
+                background: #ffffff;
+                border-radius: 8px;
+                border: 1px solid #e1e5e9;
+                line-height: 1.7;
+                color: #34495e;
+            }
         '''
     )
 
@@ -2743,10 +2813,15 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             # Build question text (include context if merged)
             q_text = q.get('text', '')
 
-            # Build choices HTML
+            # Build choices HTML with styled formatting
             choices = q.get('choices', {})
             if choices:
-                choices_html = '<br>'.join([f"{letter}. {text}" for letter, text in sorted(choices.items())])
+                choice_items = []
+                for letter, text in sorted(choices.items()):
+                    choice_items.append(
+                        f'<div class="choice"><span class="choice-letter">{letter}.</span>{text}</div>'
+                    )
+                choices_html = ''.join(choice_items)
             else:
                 choices_html = ''
 
