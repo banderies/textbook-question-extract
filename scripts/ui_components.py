@@ -513,11 +513,9 @@ def run_feeling_lucky(pdf_path: str, models: dict, workers: dict):
 
     questions_model_id = get_model_id(models['questions'])
 
-    # Parse extracted text into lines array (with image markers)
-    all_lines = st.session_state.extracted_text.split("\n")
-
-    # Build lines_with_images array (lines with image markers inserted)
-    lines_with_images = insert_image_markers(all_lines, st.session_state.images, pages)
+    # Use the raw lines with image markers (without line prefixes) from Step 1
+    # build_chapter_text_with_lines will add line prefixes
+    lines_with_images = lines_with_markers
 
     chapters = st.session_state.chapters
     total_chapters = len(chapters)
@@ -559,14 +557,14 @@ def run_feeling_lucky(pdf_path: str, models: dict, workers: dict):
             a_start = lr.get("answer_start", 0)
             a_end = lr.get("answer_end", 0)
 
-            if not all([q_start, q_end, a_start, a_end]):
+            if not all([q_start, q_end]):
                 continue
 
-            q_text, q_images = extract_lines_by_range_mapped(lines_with_images, line_mapping, q_start, q_end)
-            a_text, a_images = extract_lines_by_range_mapped(lines_with_images, line_mapping, a_start, a_end)
+            q_text = extract_lines_by_range_mapped(lines_with_images, q_start, q_end, line_mapping) if q_start > 0 else ""
+            a_text = extract_lines_by_range_mapped(lines_with_images, a_start, a_end, line_mapping) if a_start > 0 else ""
 
-            # Combine images from question and answer ranges
-            image_files = list(set(q_images + a_images))
+            # Get images from the LLM's response
+            image_files = lr.get("image_files", [])
 
             raw_questions.append({
                 "question_id": q_id,
@@ -887,7 +885,7 @@ def render_source_step():
                 "Workers:",
                 min_value=1,
                 max_value=50,
-                value=10,
+                value=20,
                 key="lucky_questions_workers",
                 help="Parallel chapters to process"
             )
@@ -907,7 +905,7 @@ def render_source_step():
                 "Workers:",
                 min_value=1,
                 max_value=50,
-                value=10,
+                value=50,
                 key="lucky_format_workers",
                 help="Parallel questions to format"
             )
@@ -927,7 +925,7 @@ def render_source_step():
                 "Workers:",
                 min_value=1,
                 max_value=50,
-                value=5,
+                value=50,
                 key="lucky_context_workers",
                 help="Parallel chapters to process"
             )
@@ -1297,7 +1295,7 @@ def render_questions_step():
             "Parallel workers:",
             min_value=1,
             max_value=50,
-            value=10,
+            value=20,
             help="Number of chapters to extract in parallel. Tier 1: 5-10 | Tier 2+: 10-20",
             key="extract_workers"
         )
@@ -1627,7 +1625,7 @@ def render_format_step():
             "Parallel workers:",
             min_value=1,
             max_value=100,
-            value=20,
+            value=50,
             help="Tier 1: use 5-10 | Tier 2+: use 20-50 | Tier 4: use 50-100",
             key="format_workers"
         )
@@ -1967,7 +1965,7 @@ def render_context_step():
             "Parallel workers:",
             min_value=1,
             max_value=50,
-            value=10,
+            value=50,
             help="Number of chapters to process in parallel",
             key="context_workers"
         )
@@ -2430,7 +2428,7 @@ def render_qc_step():
                         for img in assigned_images:
                             filepath = img["filepath"]
                             if os.path.exists(filepath):
-                                st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_container_width=True)
+                                st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_column_width=True)
 
                                 st.button("Remove Image", key=f"img_remove_{img['filename']}",
                                          on_click=remove_image, args=(img["filename"],))
@@ -2513,7 +2511,7 @@ def render_qc_step():
                                 for page_num in question_pages:
                                     png_bytes = render_pdf_page(pdf_path, page_num, zoom=1.2)
                                     if png_bytes:
-                                        st.image(png_bytes, caption=f"Page {page_num}", use_container_width=True)
+                                        st.image(png_bytes, caption=f"Page {page_num}", use_column_width=True)
                                     else:
                                         st.error(f"Failed to render page {page_num}")
                             else:
@@ -2529,7 +2527,7 @@ def render_qc_step():
                                 for page_num in answer_pages:
                                     png_bytes = render_pdf_page(pdf_path, page_num, zoom=1.2)
                                     if png_bytes:
-                                        st.image(png_bytes, caption=f"Page {page_num}", use_container_width=True)
+                                        st.image(png_bytes, caption=f"Page {page_num}", use_column_width=True)
                                     else:
                                         st.error(f"Failed to render page {page_num}")
                             else:
