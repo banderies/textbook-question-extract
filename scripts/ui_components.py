@@ -718,15 +718,19 @@ def run_feeling_lucky(pdf_path: str, models: dict, workers: dict):
         if not ch_questions:
             return ch_key, ch_questions, ch_stats
 
-        # Build summary for LLM
+        # Build summary for LLM with rich context
         questions_summary = []
         for q in ch_questions:
-            has_choices = bool(q.get("choices"))
+            choices = q.get("choices", {})
+            has_choices = bool(choices)
             summary = {
                 "full_id": q["full_id"],
                 "local_id": q["local_id"],
-                "text_preview": q["text"][:200] + "..." if len(q["text"]) > 200 else q["text"],
-                "has_choices": has_choices
+                "text_preview": q["text"][:300] + "..." if len(q["text"]) > 300 else q["text"],
+                "has_choices": has_choices,
+                "num_choices": len(choices),
+                "has_correct_answer": bool(q.get("correct_answer")),
+                "has_explanation": bool(q.get("explanation"))
             }
             questions_summary.append(summary)
 
@@ -760,6 +764,12 @@ def run_feeling_lucky(pdf_path: str, models: dict, workers: dict):
                     continue
 
                 context_q = question_by_id[context_id]
+
+                # Only validation: filter out self-references (question inheriting from itself)
+                sub_ids = [sid for sid in sub_ids if sid != context_id]
+                if not sub_ids:
+                    continue
+
                 context_text = context_q.get("text", "").strip()
                 context_q["is_context_only"] = True
                 ch_stats["context_questions_found"] += 1
@@ -1814,6 +1824,33 @@ def render_context_step():
     with col2:
         st.metric("Potential Context Questions", context_only_count)
 
+    # Controls section - moved to top for easy access
+    st.markdown("---")
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1.5, 2])
+
+    with ctrl_col1:
+        model_options = get_model_options()
+        current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
+        selected_model = st.selectbox("Model:", model_options, index=current_idx, key="context_model")
+        if selected_model != st.session_state.selected_model:
+            st.session_state.selected_model = selected_model
+            save_settings()
+
+    with ctrl_col2:
+        context_workers = st.number_input(
+            "Parallel workers:",
+            min_value=1,
+            max_value=50,
+            value=50,
+            help="Number of chapters to process in parallel",
+            key="context_workers"
+        )
+
+    with ctrl_col3:
+        run_context_association = st.button("Associate Context", type="primary")
+
+    st.markdown("---")
+
     # Preview potential context-only questions (before association)
     if context_only_count > 0:
         potential_context = []
@@ -1926,23 +1963,25 @@ def render_context_step():
 
                     img_indicator = f" [{len(q_images)} img]" if q_images else ""
 
-                    with st.expander(f"**{q['full_id']}**{img_indicator}", expanded=False):
-                        col1, col2 = st.columns([2, 1])
+                    # Use container with divider instead of nested expander
+                    st.markdown(f"---")
+                    st.markdown(f"**{q['full_id']}**{img_indicator}")
+                    col1, col2 = st.columns([2, 1])
 
-                        with col1:
-                            st.markdown(q.get("text", "No text"))
+                    with col1:
+                        st.markdown(q.get("text", "No text")[:300] + "..." if len(q.get("text", "")) > 300 else q.get("text", "No text"))
 
-                            # Show which sub-questions inherited this context
-                            inherited_by = [sq["local_id"] for sq in st.session_state.questions_merged.get(ch_key, [])
-                                           if sq.get("context_from") == q["full_id"]]
-                            if inherited_by:
-                                st.success(f"Context inherited by: {', '.join(inherited_by)}")
+                        # Show which sub-questions inherited this context
+                        inherited_by = [sq["local_id"] for sq in st.session_state.questions_merged.get(ch_key, [])
+                                       if sq.get("context_from") == q["full_id"]]
+                        if inherited_by:
+                            st.success(f"Context inherited by: {', '.join(inherited_by)}")
 
-                        with col2:
-                            if q_images:
-                                for img in q_images:
-                                    if os.path.exists(img["filepath"]):
-                                        st.image(img["filepath"], caption=f"Page {img['page']}", use_column_width=True)
+                    with col2:
+                        if q_images:
+                            for img in q_images:
+                                if os.path.exists(img["filepath"]):
+                                    st.image(img["filepath"], caption=f"Page {img['page']}", use_column_width=True)
 
         st.subheader("Merged Questions Preview")
 
@@ -2024,198 +2063,186 @@ def render_context_step():
                     elif q.get("has_image"):
                         st.warning("Needs image assignment")
 
-    st.markdown("---")
+    # Button processing logic (button rendered at top of page)
+    if run_context_association:
+        client = get_anthropic_client()
+        if not client:
+            st.error("ANTHROPIC_API_KEY not set. Please set the environment variable.")
+        else:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            chapter_status = st.empty()
 
-    col1, col2, col3 = st.columns([2, 1.5, 2])
+            questions_copy = copy.deepcopy(st.session_state.questions)
+            assignments_copy = copy.deepcopy(st.session_state.image_assignments)
+            model_id = get_model_id(st.session_state.selected_model)
 
-    with col1:
-        model_options = get_model_options()
-        current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
-        selected_model = st.selectbox("Model:", model_options, index=current_idx, key="context_model")
-        if selected_model != st.session_state.selected_model:
-            st.session_state.selected_model = selected_model
-            save_settings()
+            total_chapters = len(questions_copy)
+            max_workers = min(context_workers, total_chapters)
+            status_text.text(f"Processing {total_chapters} chapters with {max_workers} parallel workers...")
 
-    with col2:
-        context_workers = st.number_input(
-            "Parallel workers:",
-            min_value=1,
-            max_value=50,
-            value=50,
-            help="Number of chapters to process in parallel",
-            key="context_workers"
-        )
+            # Worker function for parallel context association
+            def process_chapter_context(ch_key: str, ch_questions: list) -> tuple:
+                """Process context for one chapter. Returns (ch_key, updated_questions, ch_stats)."""
+                from llm_extraction import get_prompt, stream_message, get_extraction_logger
+                import json
+                import re
 
-    with col3:
-        if st.button("Associate Context", type="primary"):
-            client = get_anthropic_client()
-            if not client:
-                st.error("ANTHROPIC_API_KEY not set. Please set the environment variable.")
-            else:
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                chapter_status = st.empty()
+                logger = get_extraction_logger()
+                ch_stats = {"context_questions_found": 0, "sub_questions_updated": 0, "images_copied": 0}
 
-                questions_copy = copy.deepcopy(st.session_state.questions)
-                assignments_copy = copy.deepcopy(st.session_state.image_assignments)
-                model_id = get_model_id(st.session_state.selected_model)
-
-                total_chapters = len(questions_copy)
-                max_workers = min(context_workers, total_chapters)
-                status_text.text(f"Processing {total_chapters} chapters with {max_workers} parallel workers...")
-
-                # Worker function for parallel context association
-                def process_chapter_context(ch_key: str, ch_questions: list) -> tuple:
-                    """Process context for one chapter. Returns (ch_key, updated_questions, ch_stats)."""
-                    from llm_extraction import get_prompt, stream_message, get_extraction_logger
-                    import json
-                    import re
-
-                    logger = get_extraction_logger()
-                    ch_stats = {"context_questions_found": 0, "sub_questions_updated": 0, "images_copied": 0}
-
-                    if not ch_questions:
-                        return ch_key, ch_questions, ch_stats
-
-                    # Build summary for LLM
-                    questions_summary = []
-                    for q in ch_questions:
-                        has_choices = bool(q.get("choices"))
-                        summary = {
-                            "full_id": q["full_id"],
-                            "local_id": q["local_id"],
-                            "text_preview": q["text"][:200] + "..." if len(q["text"]) > 200 else q["text"],
-                            "has_choices": has_choices
-                        }
-                        questions_summary.append(summary)
-
-                    prompt = get_prompt("associate_context",
-                                       questions_summary=json.dumps(questions_summary, indent=2))
-
-                    try:
-                        response_text, usage = stream_message(
-                            get_anthropic_client(),
-                            model_id,
-                            messages=[{"role": "user", "content": prompt}]
-                        )
-
-                        logger.info(f"Context association {ch_key}: input={usage['input_tokens']:,}, output={usage['output_tokens']:,}")
-
-                        if "```" in response_text:
-                            match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
-                            if match:
-                                response_text = match.group(1)
-
-                        result = json.loads(response_text)
-                        mappings = result.get("context_mappings", [])
-
-                        question_by_id = {q["full_id"]: q for q in ch_questions}
-
-                        for mapping in mappings:
-                            context_id = mapping.get("context_id")
-                            sub_ids = mapping.get("sub_question_ids", [])
-
-                            if not context_id or context_id not in question_by_id:
-                                continue
-
-                            context_q = question_by_id[context_id]
-                            context_text = context_q.get("text", "").strip()
-                            context_q["is_context_only"] = True
-                            ch_stats["context_questions_found"] += 1
-
-                            # Count context images
-                            context_images = [img for img, assigned_to in assignments_copy.items() if assigned_to == context_id]
-                            ch_stats["images_copied"] += len(context_images)
-
-                            for sub_id in sub_ids:
-                                if sub_id not in question_by_id:
-                                    continue
-                                sub_q = question_by_id[sub_id]
-                                if sub_q.get("context_merged"):
-                                    continue
-                                original_text = sub_q.get("text", "").strip()
-                                sub_q["text"] = f"{context_text} {original_text}"
-                                sub_q["context_merged"] = True
-                                sub_q["context_from"] = context_id
-                                sub_q["is_context_only"] = False
-                                ch_stats["sub_questions_updated"] += 1
-
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Context association {ch_key}: JSON parse error - {e}")
-                    except Exception as e:
-                        logger.error(f"Context association {ch_key}: API error - {type(e).__name__}: {e}")
-
-                    # Ensure all questions have is_context_only set
-                    for q in ch_questions:
-                        if "is_context_only" not in q:
-                            q["is_context_only"] = False
-
+                if not ch_questions:
                     return ch_key, ch_questions, ch_stats
 
-                # Process chapters in parallel
-                completed = 0
-                updated_questions = {}
-                total_stats = {"context_questions_found": 0, "sub_questions_updated": 0, "images_copied": 0}
-
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_ch = {
-                        executor.submit(process_chapter_context, ch_key, ch_questions): ch_key
-                        for ch_key, ch_questions in questions_copy.items()
+                # Build summary for LLM with rich context
+                questions_summary = []
+                for q in ch_questions:
+                    choices = q.get("choices", {})
+                    has_choices = bool(choices)
+                    summary = {
+                        "full_id": q["full_id"],
+                        "local_id": q["local_id"],
+                        "text_preview": q["text"][:300] + "..." if len(q["text"]) > 300 else q["text"],
+                        "has_choices": has_choices,
+                        "num_choices": len(choices),
+                        "has_correct_answer": bool(q.get("correct_answer")),
+                        "has_explanation": bool(q.get("explanation"))
                     }
+                    questions_summary.append(summary)
 
-                    in_progress = set(list(questions_copy.keys())[:max_workers])
-                    chapter_status.text(f"In progress: {', '.join(sorted(in_progress))}")
+                prompt = get_prompt("associate_context",
+                                   questions_summary=json.dumps(questions_summary, indent=2))
 
-                    for future in as_completed(future_to_ch):
-                        ch_key = future_to_ch[future]
-                        try:
-                            result_ch_key, result_questions, ch_stats = future.result()
-                            updated_questions[result_ch_key] = result_questions
-                            for key in total_stats:
-                                total_stats[key] += ch_stats[key]
-                            # Save incrementally after each chapter completes
-                            st.session_state.questions_merged[result_ch_key] = result_questions
-                            save_questions_merged()
-                        except Exception as e:
-                            logger.error(f"Context association {ch_key}: Failed - {e}")
-                            updated_questions[ch_key] = questions_copy[ch_key]
+                try:
+                    response_text, usage = stream_message(
+                        get_anthropic_client(),
+                        model_id,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
 
-                        completed += 1
-                        in_progress.discard(ch_key)
+                    logger.info(f"Context association {ch_key}: input={usage['input_tokens']:,}, output={usage['output_tokens']:,}")
 
-                        # Update in-progress set
-                        for next_ch in questions_copy.keys():
-                            if next_ch not in in_progress and next_ch not in updated_questions:
-                                in_progress.add(next_ch)
-                                break
+                    if "```" in response_text:
+                        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+                        if match:
+                            response_text = match.group(1)
 
-                        progress_bar.progress(completed / total_chapters)
-                        status_text.text(f"Completed {completed}/{total_chapters} chapters...")
-                        if in_progress:
-                            chapter_status.text(f"In progress: {', '.join(sorted(in_progress))}")
-                        else:
-                            chapter_status.empty()
+                    result = json.loads(response_text)
+                    mappings = result.get("context_mappings", [])
 
-                status_text.text("Saving final merged data...")
+                    question_by_id = {q["full_id"]: q for q in ch_questions}
 
-                st.session_state.questions_merged = updated_questions
-                st.session_state.image_assignments_merged = assignments_copy
-                save_questions_merged()
-                save_image_assignments_merged()
+                    for mapping in mappings:
+                        context_id = mapping.get("context_id")
+                        sub_ids = mapping.get("sub_question_ids", [])
 
-                progress_bar.progress(1.0)
-                status_text.text("Done!")
-                chapter_status.empty()
+                        if not context_id or context_id not in question_by_id:
+                            continue
 
-                st.success(
-                    f"Context association complete!\n\n"
-                    f"- Context questions found: {total_stats['context_questions_found']}\n"
-                    f"- Sub-questions updated: {total_stats['sub_questions_updated']}\n"
-                    f"- Images copied: {total_stats['images_copied']}"
-                )
-                play_completion_sound()
+                        context_q = question_by_id[context_id]
 
-                st.rerun()
+                        # Only validation: filter out self-references
+                        sub_ids = [sid for sid in sub_ids if sid != context_id]
+                        if not sub_ids:
+                            continue
+
+                        context_text = context_q.get("text", "").strip()
+                        context_q["is_context_only"] = True
+                        ch_stats["context_questions_found"] += 1
+
+                        # Count context images
+                        context_images = [img for img, assigned_to in assignments_copy.items() if assigned_to == context_id]
+                        ch_stats["images_copied"] += len(context_images)
+
+                        for sub_id in sub_ids:
+                            if sub_id not in question_by_id:
+                                continue
+                            sub_q = question_by_id[sub_id]
+                            if sub_q.get("context_merged"):
+                                continue
+                            original_text = sub_q.get("text", "").strip()
+                            sub_q["text"] = f"{context_text} {original_text}"
+                            sub_q["context_merged"] = True
+                            sub_q["context_from"] = context_id
+                            sub_q["is_context_only"] = False
+                            ch_stats["sub_questions_updated"] += 1
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Context association {ch_key}: JSON parse error - {e}")
+                except Exception as e:
+                    logger.error(f"Context association {ch_key}: API error - {type(e).__name__}: {e}")
+
+                # Ensure all questions have is_context_only set
+                for q in ch_questions:
+                    if "is_context_only" not in q:
+                        q["is_context_only"] = False
+
+                return ch_key, ch_questions, ch_stats
+
+            # Process chapters in parallel
+            completed = 0
+            updated_questions = {}
+            total_stats = {"context_questions_found": 0, "sub_questions_updated": 0, "images_copied": 0}
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_ch = {
+                    executor.submit(process_chapter_context, ch_key, ch_questions): ch_key
+                    for ch_key, ch_questions in questions_copy.items()
+                }
+
+                in_progress = set(list(questions_copy.keys())[:max_workers])
+                chapter_status.text(f"In progress: {', '.join(sorted(in_progress))}")
+
+                for future in as_completed(future_to_ch):
+                    ch_key = future_to_ch[future]
+                    try:
+                        result_ch_key, result_questions, ch_stats = future.result()
+                        updated_questions[result_ch_key] = result_questions
+                        for key in total_stats:
+                            total_stats[key] += ch_stats[key]
+                        # Save incrementally after each chapter completes
+                        st.session_state.questions_merged[result_ch_key] = result_questions
+                        save_questions_merged()
+                    except Exception as e:
+                        logger.error(f"Context association {ch_key}: Failed - {e}")
+                        updated_questions[ch_key] = questions_copy[ch_key]
+
+                    completed += 1
+                    in_progress.discard(ch_key)
+
+                    # Update in-progress set
+                    for next_ch in questions_copy.keys():
+                        if next_ch not in in_progress and next_ch not in updated_questions:
+                            in_progress.add(next_ch)
+                            break
+
+                    progress_bar.progress(completed / total_chapters)
+                    status_text.text(f"Completed {completed}/{total_chapters} chapters...")
+                    if in_progress:
+                        chapter_status.text(f"In progress: {', '.join(sorted(in_progress))}")
+                    else:
+                        chapter_status.empty()
+
+            status_text.text("Saving final merged data...")
+
+            st.session_state.questions_merged = updated_questions
+            st.session_state.image_assignments_merged = assignments_copy
+            save_questions_merged()
+            save_image_assignments_merged()
+
+            progress_bar.progress(1.0)
+            status_text.text("Done!")
+            chapter_status.empty()
+
+            st.success(
+                f"Context association complete!\n\n"
+                f"- Context questions found: {total_stats['context_questions_found']}\n"
+                f"- Sub-questions updated: {total_stats['sub_questions_updated']}\n"
+                f"- Images copied: {total_stats['images_copied']}"
+            )
+            play_completion_sound()
+
+            st.rerun()
 
     if merged_count > 0:
         st.markdown("---")
@@ -2279,12 +2306,15 @@ def render_qc_step():
             st.success("QC and export data cleared")
             st.rerun()
 
-    if not st.session_state.questions:
+    # Use merged questions if available (after Step 5), otherwise use formatted questions (Step 4)
+    questions_source = st.session_state.questions_merged if st.session_state.questions_merged else st.session_state.questions
+
+    if not questions_source:
         st.warning("Please format questions first (Step 4)")
         return
 
     all_questions = []
-    for ch_key, questions in st.session_state.questions.items():
+    for ch_key, questions in questions_source.items():
         for q in questions:
             all_questions.append((ch_key, q))
 
@@ -2306,7 +2336,7 @@ def render_qc_step():
         filter_option = st.radio("Show:", ["All", "Unreviewed only", "Reviewed only"], horizontal=True)
     with col2:
         chapter_filter = st.selectbox("Filter by chapter:",
-                                       ["All chapters"] + sort_chapter_keys(st.session_state.questions.keys()))
+                                       ["All chapters"] + sort_chapter_keys(questions_source.keys()))
     with col3:
         hide_context = st.checkbox("Hide context-only entries", value=True)
 

@@ -1190,15 +1190,19 @@ def associate_context_llm(client, questions: dict, image_assignments: dict,
         if not ch_questions:
             continue
 
-        # Build a summary of questions for the LLM
+        # Build summary for LLM with rich context
         questions_summary = []
         for q in ch_questions:
-            has_choices = bool(q.get("choices"))
+            choices = q.get("choices", {})
+            has_choices = bool(choices)
             summary = {
                 "full_id": q["full_id"],
                 "local_id": q["local_id"],
-                "text_preview": q["text"][:200] + "..." if len(q["text"]) > 200 else q["text"],
-                "has_choices": has_choices
+                "text_preview": q["text"][:300] + "..." if len(q["text"]) > 300 else q["text"],
+                "has_choices": has_choices,
+                "num_choices": len(choices),
+                "has_correct_answer": bool(q.get("correct_answer")),
+                "has_explanation": bool(q.get("explanation"))
             }
             questions_summary.append(summary)
 
@@ -1236,6 +1240,12 @@ def associate_context_llm(client, questions: dict, image_assignments: dict,
                     continue
 
                 context_q = question_by_id[context_id]
+
+                # Only validation: filter out self-references (question inheriting from itself)
+                sub_ids = [sid for sid in sub_ids if sid != context_id]
+                if not sub_ids:
+                    continue
+
                 context_text = context_q.get("text", "").strip()
 
                 context_q["is_context_only"] = True

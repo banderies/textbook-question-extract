@@ -165,26 +165,46 @@ associate_context:
   prompt: |
     Analyze these questions from a medical textbook and identify CONTEXT relationships.
 
-    CONTEXT PATTERN:
-    Some questions follow this pattern:
-    - A "context question" (e.g., ID "1") contains a clinical scenario but NO answer choices
-    - Sub-questions (e.g., "1a", "1b", "1c") contain the actual questions WITH answer choices
-    - The sub-questions all relate to the context question
+    WHAT IS A CONTEXT RELATIONSHIP?
+    Sometimes a clinical scenario, case description, or introductory paragraph provides context
+    that multiple follow-up questions refer to. The context entry itself is NOT a standalone
+    question - it provides background information that the actual questions build upon.
 
-    YOUR TASK:
-    1. Identify which questions are "context-only" (have text but NO answer choices)
-    2. For each context question, identify which sub-questions belong to it
-    3. Sub-questions typically share the same base number (1a, 1b, 1c all belong to context 1)
+    AVAILABLE DATA FOR EACH QUESTION:
+    - full_id: Complete question identifier (e.g., "ch1_5")
+    - local_id: Question number within chapter (e.g., "5", "5a")
+    - text_preview: First 300 characters of the question text
+    - has_choices: Whether the question has A/B/C/D answer options
+    - num_choices: Number of answer choices (0-5)
+    - has_correct_answer: Whether a correct answer was identified
+    - has_explanation: Whether an explanation/answer text exists
+
+    STRONG SIGNALS THAT SOMETHING IS A REAL QUESTION (NOT context):
+    - has_choices: true AND num_choices >= 2
+    - has_correct_answer: true
+    - has_explanation: true
+    - Text contains "Which of the following", "What is", or similar question patterns
+
+    STRONG SIGNALS THAT SOMETHING IS CONTEXT:
+    - has_choices: false AND num_choices: 0
+    - has_correct_answer: false
+    - Text describes a scenario, patient history, or clinical situation
+    - Followed by related questions that reference it
+
+    CRITICAL:
+    - Be CONSERVATIVE - only create mappings when you're confident
+    - A question with has_choices: true, has_correct_answer: true, and has_explanation: true is almost certainly a real question, NOT context
+    - If unsure, return an empty mappings array
 
     QUESTIONS:
     {questions_summary}
 
-    Return a JSON object with this structure:
+    Return a JSON object:
     {{
       "context_mappings": [
         {{
-          "context_id": "ch1_1",
-          "sub_question_ids": ["ch1_1a", "ch1_1b", "ch1_1c"]
+          "context_id": "ch1_5",
+          "sub_question_ids": ["ch1_5a", "ch1_5b", "ch1_5c"]
         }}
       ]
     }}
