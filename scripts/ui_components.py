@@ -833,6 +833,15 @@ def run_feeling_lucky(pdf_path: str, models: dict, workers: dict):
 
     st.session_state.questions_merged = updated_questions
     st.session_state.image_assignments_merged = assignments_copy
+
+    # Detect page numbers for merged questions
+    if st.session_state.pages and st.session_state.chapters:
+        add_page_numbers_to_questions(
+            st.session_state.questions_merged,
+            st.session_state.pages,
+            st.session_state.chapters
+        )
+
     save_questions_merged()
     save_image_assignments_merged()
 
@@ -2233,6 +2242,16 @@ def render_context_step():
 
             st.session_state.questions_merged = updated_questions
             st.session_state.image_assignments_merged = assignments_copy
+
+            # Detect page numbers for merged questions
+            if st.session_state.pages and st.session_state.chapters:
+                status_text.text("Detecting page numbers...")
+                add_page_numbers_to_questions(
+                    st.session_state.questions_merged,
+                    st.session_state.pages,
+                    st.session_state.chapters
+                )
+
             save_questions_merged()
             save_image_assignments_merged()
 
@@ -2868,9 +2887,16 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             # Build source reference
             local_id = q.get('local_id', q_id.split('_')[-1])
             source_parts = [f'<span class="source-ref-label">Source:</span> Chapter {ch_num} ({ch_title}), Question {local_id}']
+
+            # Add page number if available
+            question_page = q.get('question_page')
+            if question_page:
+                source_parts.append(f'(p. {question_page})')
+
             if q.get('context_from'):
                 context_local_id = q['context_from'].split('_')[-1]
-                source_parts.append(f'(includes context from Q{context_local_id})')
+                source_parts.append(f'[context from Q{context_local_id}]')
+
             source_ref = ' '.join(source_parts)
 
             # Create note
