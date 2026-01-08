@@ -43,9 +43,148 @@ from llm_extraction import (
 # Helper Functions
 # =============================================================================
 
+def play_completion_sound():
+    """Play a pleasant notification sound when processing completes.
+
+    Uses Web Audio API to generate a short, pleasant tone.
+    """
+    import streamlit.components.v1 as components
+
+    # JavaScript to play a completion sound using Web Audio API
+    # Creates a pleasant two-tone chime
+    sound_js = """
+    <script>
+    (function() {
+        try {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+            // First tone (higher pitch)
+            const osc1 = audioCtx.createOscillator();
+            const gain1 = audioCtx.createGain();
+            osc1.connect(gain1);
+            gain1.connect(audioCtx.destination);
+            osc1.frequency.value = 880; // A5
+            osc1.type = 'sine';
+            gain1.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gain1.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+            osc1.start(audioCtx.currentTime);
+            osc1.stop(audioCtx.currentTime + 0.3);
+
+            // Second tone (lower pitch, slightly delayed)
+            const osc2 = audioCtx.createOscillator();
+            const gain2 = audioCtx.createGain();
+            osc2.connect(gain2);
+            gain2.connect(audioCtx.destination);
+            osc2.frequency.value = 1318.5; // E6
+            osc2.type = 'sine';
+            gain2.gain.setValueAtTime(0, audioCtx.currentTime + 0.1);
+            gain2.gain.setValueAtTime(0.3, audioCtx.currentTime + 0.1);
+            gain2.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+            osc2.start(audioCtx.currentTime + 0.1);
+            osc2.stop(audioCtx.currentTime + 0.5);
+        } catch (e) {
+            console.log('Audio playback not supported:', e);
+        }
+    })();
+    </script>
+    """
+    components.html(sound_js, height=0, width=0)
+
+
 def get_selected_model_id() -> str:
     """Get the currently selected Claude model ID."""
     return get_model_id(st.session_state.selected_model)
+
+
+def clear_step_data(step_id: str, cascade: bool = True):
+    """Clear data for a specific step and all subsequent steps, allowing re-run from that point.
+
+    Args:
+        step_id: One of 'source', 'chapters', 'questions', 'format', 'context', 'qc', 'export'
+        cascade: If True, also clear all subsequent steps (default True)
+    """
+    # Define step order for cascading
+    step_order = ["source", "chapters", "questions", "format", "context", "qc", "export"]
+
+    # Find the index of the current step
+    try:
+        start_idx = step_order.index(step_id)
+    except ValueError:
+        start_idx = 0
+
+    # Determine which steps to clear
+    steps_to_clear = step_order[start_idx:] if cascade else [step_id]
+
+    output_dir = get_output_dir()
+
+    for step in steps_to_clear:
+        if step == "source":
+            # Clear pages, images, extracted text
+            st.session_state.pages = None
+            st.session_state.images = []
+            st.session_state.pdf_path = None
+            if "extracted_text" in st.session_state:
+                del st.session_state.extracted_text
+            # Delete files
+            for filename in ["pages.json", "images.json", "extracted_text.txt"]:
+                filepath = os.path.join(output_dir, filename)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            # Delete images directory
+            images_dir = get_images_dir()
+            if os.path.exists(images_dir):
+                import shutil
+                shutil.rmtree(images_dir)
+
+        elif step == "chapters":
+            # Clear chapters and chapter texts
+            st.session_state.chapters = None
+            st.session_state.chapter_texts = {}
+            # Delete files
+            for filename in ["chapters.json", "chapter_text.json"]:
+                filepath = os.path.join(output_dir, filename)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+
+        elif step == "questions":
+            # Clear raw questions
+            st.session_state.raw_questions = {}
+            filepath = os.path.join(output_dir, "raw_questions.json")
+            if os.path.exists(filepath):
+                os.remove(filepath)
+
+        elif step == "format":
+            # Clear formatted questions and image assignments
+            st.session_state.questions = {}
+            st.session_state.image_assignments = {}
+            for filename in ["questions_by_chapter.json", "image_assignments.json"]:
+                filepath = os.path.join(output_dir, filename)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+
+        elif step == "context":
+            # Clear merged questions and assignments
+            st.session_state.questions_merged = {}
+            st.session_state.image_assignments_merged = {}
+            for filename in ["questions_merged.json", "image_assignments_merged.json"]:
+                filepath = os.path.join(output_dir, filename)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+
+        elif step == "qc":
+            # Clear QC progress
+            st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
+            st.session_state.qc_selected_idx = 0
+            filepath = os.path.join(output_dir, "qc_progress.json")
+            if os.path.exists(filepath):
+                os.remove(filepath)
+
+        elif step == "export":
+            # Delete any exported .apkg files
+            if os.path.exists(output_dir):
+                for filename in os.listdir(output_dir):
+                    if filename.endswith(".apkg"):
+                        os.remove(os.path.join(output_dir, filename))
 
 
 def sort_chapter_keys(keys: list) -> list:
@@ -176,6 +315,25 @@ def get_all_question_options() -> list[str]:
 # Sidebar
 # =============================================================================
 
+def get_step_completion_status() -> dict[str, bool]:
+    """Check which steps are completed based on session state data."""
+    # QC is complete only when ALL questions have been reviewed
+    total_questions = sum(len(qs) for qs in st.session_state.questions.values())
+    reviewed_count = len(st.session_state.qc_progress.get("reviewed", {}))
+    qc_complete = total_questions > 0 and reviewed_count >= total_questions
+
+    return {
+        "source": st.session_state.pages is not None and len(st.session_state.pages) > 0,
+        "chapters": st.session_state.chapters is not None and len(st.session_state.chapters) > 0,
+        "questions": bool(st.session_state.get("raw_questions")) and sum(len(qs) for qs in st.session_state.raw_questions.values()) > 0,
+        "format": bool(st.session_state.questions) and sum(len(qs) for qs in st.session_state.questions.values()) > 0,
+        "context": bool(st.session_state.questions_merged) and sum(len(qs) for qs in st.session_state.questions_merged.values()) > 0,
+        "qc": qc_complete,
+        "export": False,  # Export is an action, not a state
+        "prompts": False,  # Prompts step is always accessible, not completable
+    }
+
+
 def render_sidebar():
     """Render sidebar with navigation."""
     st.sidebar.title("Textbook Q&A Extractor")
@@ -185,6 +343,27 @@ def render_sidebar():
         st.sidebar.caption(f"Working on: **{textbook_name}**")
 
     st.sidebar.markdown("---")
+
+    # Get step completion status
+    completion_status = get_step_completion_status()
+
+    # CSS for green completed step buttons
+    st.sidebar.markdown("""
+        <style>
+        /* Green styling for completed step buttons (primary type) in sidebar */
+        section[data-testid="stSidebar"] button[kind="primary"],
+        [data-testid="stSidebar"] button[kind="primary"] {
+            background-color: #28a745 !important;
+            color: white !important;
+            border-color: #28a745 !important;
+        }
+        section[data-testid="stSidebar"] button[kind="primary"]:hover,
+        [data-testid="stSidebar"] button[kind="primary"]:hover {
+            background-color: #218838 !important;
+            border-color: #1e7e34 !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
     steps = [
         ("source", "1. Select Source"),
@@ -198,7 +377,10 @@ def render_sidebar():
     ]
 
     for step_id, step_name in steps:
-        if st.sidebar.button(step_name, key=f"nav_{step_id}"):
+        is_complete = completion_status.get(step_id, False)
+        btn_type = "primary" if is_complete else "secondary"
+
+        if st.sidebar.button(step_name, key=f"nav_{step_id}", type=btn_type):
             st.session_state.current_step = step_id
             save_settings()
 
@@ -247,7 +429,14 @@ def render_sidebar():
 
 def render_source_step():
     """Render source PDF selection step."""
-    st.header("Step 1: Select Source PDF")
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.header("Step 1: Select Source PDF")
+    with col2:
+        if st.button("Reset To This Step", key="clear_source", type="secondary", help="Clear this step and all subsequent steps"):
+            clear_step_data("source")
+            st.success("All data cleared")
+            st.rerun()
 
     pdf_files = list(Path(SOURCE_DIR).glob("*.pdf")) if os.path.exists(SOURCE_DIR) else []
 
@@ -401,7 +590,14 @@ def render_source_step():
 
 def render_chapters_step():
     """Render chapter extraction step."""
-    st.header("Step 2: Extract Chapters")
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.header("Step 2: Extract Chapters")
+    with col2:
+        if st.button("Reset To This Step", key="clear_chapters", type="secondary", help="Clear this step and all subsequent steps"):
+            clear_step_data("chapters")
+            st.success("Chapters and subsequent data cleared")
+            st.rerun()
 
     has_pages = st.session_state.pages is not None
     has_chapters = st.session_state.chapters is not None
@@ -452,6 +648,7 @@ def render_chapters_step():
                         save_images()
 
                 st.success(f"Found {len(chapters)} chapters")
+                play_completion_sound()
                 st.rerun()
     elif has_chapters:
         st.info("Chapters already extracted. Go to Step 1 to reload PDF if you need to re-extract.")
@@ -487,7 +684,14 @@ def render_chapters_step():
 
 def render_questions_step():
     """Render raw question extraction step - identifies line ranges and extracts raw text."""
-    st.header("Step 3: Extract Questions")
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.header("Step 3: Extract Questions")
+    with col2:
+        if st.button("Reset To This Step", key="clear_questions", type="secondary", help="Clear this step and all subsequent steps"):
+            clear_step_data("questions")
+            st.success("Questions and subsequent data cleared")
+            st.rerun()
 
     st.markdown("""
     This step identifies question and answer boundaries in the text and extracts raw Q&A pairs.
@@ -623,6 +827,7 @@ def render_questions_step():
                     save_raw_questions()
                     progress_text.empty()
                     st.success(f"Extracted {len(raw_questions)} raw Q&A pairs from Chapter {ch_num}")
+                    play_completion_sound()
                 else:
                     progress_text.empty()
                     st.warning(f"No questions extracted from Chapter {ch_num}")
@@ -769,6 +974,7 @@ def render_questions_step():
 
             total_raw = sum(len(qs) for qs in results.values())
             st.success(f"Extracted {total_raw} raw Q&A pairs from {total_chapters} chapters")
+            play_completion_sound()
             st.info("**Next:** Go to **Step 4: Format Questions** to format the raw Q&A pairs.")
             st.rerun()
 
@@ -816,7 +1022,14 @@ def render_questions_step():
 
 def render_format_step():
     """Render question formatting step - formats raw Q&A pairs using parallel LLM calls."""
-    st.header("Step 4: Format Questions")
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.header("Step 4: Format Questions")
+    with col2:
+        if st.button("Reset To This Step", key="clear_format", type="secondary", help="Clear this step and all subsequent steps"):
+            clear_step_data("format")
+            st.success("Format and subsequent data cleared")
+            st.rerun()
 
     st.markdown("""
     This step takes the raw Q&A pairs and formats them into structured data using parallel LLM calls.
@@ -960,6 +1173,7 @@ def render_format_step():
 
             status_text.text("Done!")
             st.success(f"Formatted {total} Q&A pairs")
+            play_completion_sound()
             st.info("**Next:** Go to **Step 5: Associate Context** to link context questions to sub-questions.")
             st.rerun()
 
@@ -1015,7 +1229,14 @@ def render_format_step():
 
 def render_context_step():
     """Render context association step."""
-    st.header("Step 5: Associate Context")
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.header("Step 5: Associate Context")
+    with col2:
+        if st.button("Reset To This Step", key="clear_context", type="secondary", help="Clear this step and all subsequent steps"):
+            clear_step_data("context")
+            st.success("Context and subsequent data cleared")
+            st.rerun()
 
     if not st.session_state.questions:
         st.warning("Please format questions first (Step 4)")
@@ -1368,6 +1589,7 @@ def render_context_step():
                     f"- Sub-questions updated: {total_stats['sub_questions_updated']}\n"
                     f"- Images copied: {total_stats['images_copied']}"
                 )
+                play_completion_sound()
 
                 st.rerun()
 
@@ -1424,7 +1646,14 @@ def render_context_step():
 
 def render_qc_step():
     """Render QC review step."""
-    st.header("Step 6: QC Questions")
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.header("Step 6: QC Questions")
+    with col2:
+        if st.button("Reset To This Step", key="clear_qc", type="secondary", help="Clear this step and all subsequent steps"):
+            clear_step_data("qc")
+            st.success("QC and export data cleared")
+            st.rerun()
 
     if not st.session_state.questions:
         st.warning("Please format questions first (Step 4)")
@@ -1651,7 +1880,7 @@ def render_qc_step():
                         for img in assigned_images:
                             filepath = img["filepath"]
                             if os.path.exists(filepath):
-                                st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_column_width=True)
+                                st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_container_width=True)
 
                                 st.button("Remove Image", key=f"img_remove_{img['filename']}",
                                          on_click=remove_image, args=(img["filename"],))
@@ -1734,7 +1963,7 @@ def render_qc_step():
                                 for page_num in question_pages:
                                     png_bytes = render_pdf_page(pdf_path, page_num, zoom=1.2)
                                     if png_bytes:
-                                        st.image(png_bytes, caption=f"Page {page_num}", use_column_width=True)
+                                        st.image(png_bytes, caption=f"Page {page_num}", use_container_width=True)
                                     else:
                                         st.error(f"Failed to render page {page_num}")
                             else:
@@ -1750,7 +1979,7 @@ def render_qc_step():
                                 for page_num in answer_pages:
                                     png_bytes = render_pdf_page(pdf_path, page_num, zoom=1.2)
                                     if png_bytes:
-                                        st.image(png_bytes, caption=f"Page {page_num}", use_column_width=True)
+                                        st.image(png_bytes, caption=f"Page {page_num}", use_container_width=True)
                                     else:
                                         st.error(f"Failed to render page {page_num}")
                             else:
@@ -1917,7 +2146,14 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
 
 def render_export_step():
     """Render export step."""
-    st.header("Step 7: Export to Anki")
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.header("Step 7: Export to Anki")
+    with col2:
+        if st.button("Clear Exports", key="clear_export", type="secondary", help="Delete exported .apkg files"):
+            clear_step_data("export")
+            st.success("Export files cleared")
+            st.rerun()
 
     if not st.session_state.questions:
         st.warning("Please format questions first (Step 4)")
@@ -1995,6 +2231,7 @@ def render_export_step():
                 )
 
                 st.success(f"Deck exported successfully!")
+                play_completion_sound()
                 st.info(f"Saved to: `{output_path}`")
 
                 # Provide download button
