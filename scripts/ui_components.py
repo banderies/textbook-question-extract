@@ -3149,12 +3149,14 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                     source_q = question_lookup.get(source_q_id, {})
                     source_explanation = source_q.get('explanation', '')
 
-                    # Extra info: learning point, category, and source explanation
+                    # Extra info: learning point, category, confidence, and source explanation
                     extra_parts = []
                     if card.get('learning_point'):
                         extra_parts.append(f"<b>Learning point:</b> {card['learning_point']}")
                     if card.get('category'):
                         extra_parts.append(f"<b>Category:</b> {card['category']}")
+                    if card.get('confidence'):
+                        extra_parts.append(f"<b>Confidence:</b> {card['confidence']}")
                     if source_explanation:
                         extra_parts.append(f"<hr><b>Source:</b><br>{source_explanation}")
                     extra = '<br>'.join(extra_parts)
