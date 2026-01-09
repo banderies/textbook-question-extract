@@ -1832,44 +1832,88 @@ def render_context_step():
     - After association, Q1's text is prepended to Q1a/Q1b/Q1c and images are linked
     """)
 
+    # Count questions and pre-extracted context
     context_only_count = 0
+    pre_extracted_context_count = 0
     total_questions = 0
     for ch_key, ch_questions in st.session_state.questions.items():
         for q in ch_questions:
             total_questions += 1
             if not q.get("choices"):
                 context_only_count += 1
+            if q.get("context_source"):
+                pre_extracted_context_count += 1
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Total Questions", total_questions)
     with col2:
-        st.metric("Potential Context Questions", context_only_count)
+        st.metric("Questions Without Choices", context_only_count)
+    with col3:
+        st.metric("Pre-extracted Context Links", pre_extracted_context_count,
+                  help="Questions with context_source already identified during extraction")
 
-    # Controls section - moved to top for easy access
+    # Controls section
     st.markdown("---")
-    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1.5, 2])
 
-    with ctrl_col1:
-        model_options = get_model_options()
-        current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
-        selected_model = st.selectbox("Model:", model_options, index=current_idx, key="context_model")
-        if selected_model != st.session_state.selected_model:
-            st.session_state.selected_model = selected_model
-            save_settings()
+    # Show different options based on whether context was pre-extracted
+    if pre_extracted_context_count > 0:
+        st.success(f"Context relationships were detected during extraction for {pre_extracted_context_count} questions.")
+        st.markdown("You can apply these directly without an additional LLM call, or run the LLM to re-analyze.")
 
-    with ctrl_col2:
-        context_workers = st.number_input(
-            "Parallel workers:",
-            min_value=1,
-            max_value=50,
-            value=50,
-            help="Number of chapters to process in parallel",
-            key="context_workers"
-        )
+        ctrl_col1, ctrl_col2 = st.columns(2)
+        with ctrl_col1:
+            apply_extracted = st.button("Apply Extracted Context", type="primary",
+                                        help="Use context_source from extraction (no LLM call)")
+        with ctrl_col2:
+            run_context_association = st.button("Run LLM Association",
+                                                help="Re-analyze with LLM (ignores pre-extracted)")
 
-    with ctrl_col3:
-        run_context_association = st.button("Associate Context", type="primary")
+        # LLM options (collapsed by default since extracted is preferred)
+        with st.expander("LLM Association Options", expanded=False):
+            llm_col1, llm_col2 = st.columns(2)
+            with llm_col1:
+                model_options = get_model_options()
+                current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
+                selected_model = st.selectbox("Model:", model_options, index=current_idx, key="context_model")
+                if selected_model != st.session_state.selected_model:
+                    st.session_state.selected_model = selected_model
+                    save_settings()
+            with llm_col2:
+                context_workers = st.number_input(
+                    "Parallel workers:",
+                    min_value=1,
+                    max_value=50,
+                    value=50,
+                    help="Number of chapters to process in parallel",
+                    key="context_workers"
+                )
+    else:
+        st.info("No context relationships were detected during extraction. Run LLM association to identify them.")
+        apply_extracted = False
+
+        ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1.5, 2])
+
+        with ctrl_col1:
+            model_options = get_model_options()
+            current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
+            selected_model = st.selectbox("Model:", model_options, index=current_idx, key="context_model")
+            if selected_model != st.session_state.selected_model:
+                st.session_state.selected_model = selected_model
+                save_settings()
+
+        with ctrl_col2:
+            context_workers = st.number_input(
+                "Parallel workers:",
+                min_value=1,
+                max_value=50,
+                value=50,
+                help="Number of chapters to process in parallel",
+                key="context_workers"
+            )
+
+        with ctrl_col3:
+            run_context_association = st.button("Associate Context", type="primary")
 
     st.markdown("---")
 
@@ -2092,6 +2136,33 @@ def render_context_step():
                         st.warning("Needs image assignment")
 
     # Button processing logic (button rendered at top of page)
+    if apply_extracted:
+        # Apply pre-extracted context without LLM call
+        from llm_extraction import apply_extracted_context
+
+        status_text = st.empty()
+        status_text.text("Applying pre-extracted context relationships...")
+
+        questions_copy = copy.deepcopy(st.session_state.questions)
+        assignments_copy = copy.deepcopy(st.session_state.image_assignments)
+
+        updated_questions, updated_assignments, stats = apply_extracted_context(
+            questions_copy, assignments_copy
+        )
+
+        # Save results
+        st.session_state.questions_merged = updated_questions
+        st.session_state.image_assignments = updated_assignments
+        save_questions_merged()
+        save_image_assignments()
+
+        status_text.empty()
+        st.success(
+            f"Applied extracted context: {stats['context_questions_found']} context questions identified, "
+            f"{stats['sub_questions_updated']} sub-questions updated"
+        )
+        st.rerun()
+
     if run_context_association:
         client = get_anthropic_client()
         if not client:

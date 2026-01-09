@@ -497,6 +497,9 @@ def extract_qa_pairs_two_pass(
         if not formatted.get("correct_answer") and lr.get("correct_letter"):
             formatted["correct_answer"] = lr["correct_letter"]
 
+        # Preserve context_source from first pass
+        formatted["context_source"] = lr.get("context_source")
+
         questions.append(formatted)
 
         # Progress log every 10 questions
@@ -1024,6 +1027,12 @@ def process_chapter_extraction(
         # Preserve image_files from two-pass extraction
         if q.get("image_files"):
             q_data["image_files"] = q["image_files"]
+        # Preserve context_source from extraction (convert local_id to full_id)
+        context_source = q.get("context_source")
+        if context_source:
+            q_data["context_source"] = f"ch{ch_num}_{context_source}"
+        else:
+            q_data["context_source"] = None
         questions.append(q_data)
 
     return (ch_key, questions)
@@ -1207,6 +1216,93 @@ def add_page_numbers_to_questions(questions: dict, pages: list[dict], chapters: 
             detect_question_pages(ch_questions, pages, ch_start, ch_end)
 
     return questions
+
+
+def apply_extracted_context(questions: dict, image_assignments: dict) -> tuple[dict, dict, dict]:
+    """
+    Apply context relationships using pre-extracted context_source field.
+
+    This uses the context_source field populated during question extraction,
+    avoiding the need for a separate LLM call.
+
+    Returns:
+        Tuple of (updated_questions, updated_image_assignments, stats)
+    """
+    logger = get_extraction_logger()
+    total_questions = sum(len(qs) for qs in questions.values())
+    logger.info(f"Applying pre-extracted context for {total_questions} questions")
+
+    if image_assignments is None:
+        image_assignments = {}
+
+    updated_assignments = dict(image_assignments)
+
+    stats = {
+        "context_questions_found": 0,
+        "sub_questions_updated": 0,
+        "images_copied": 0,
+        "method": "extracted"
+    }
+
+    for ch_key, ch_questions in questions.items():
+        if not ch_questions:
+            continue
+
+        # Build lookup by full_id
+        question_by_id = {q["full_id"]: q for q in ch_questions}
+
+        # Find all context sources (questions that provide context to others)
+        context_ids = set()
+        for q in ch_questions:
+            context_source = q.get("context_source")
+            if context_source:
+                context_ids.add(context_source)
+
+        # Mark context providers and merge into sub-questions
+        for q in ch_questions:
+            context_source = q.get("context_source")
+
+            if q["full_id"] in context_ids:
+                # This question provides context to others
+                if not q.get("is_context_only"):
+                    q["is_context_only"] = True
+                    stats["context_questions_found"] += 1
+
+            if context_source and context_source in question_by_id:
+                # This question inherits context
+                if q.get("context_merged"):
+                    continue  # Already processed
+
+                context_q = question_by_id[context_source]
+                context_text = context_q.get("text", "").strip()
+
+                if context_text:
+                    original_text = q.get("text", "").strip()
+                    q["text"] = f"{context_text} {original_text}"
+                    q["context_merged"] = True
+                    q["context_from"] = context_source
+                    q["is_context_only"] = False
+                    stats["sub_questions_updated"] += 1
+
+                    # Count images that will be inherited
+                    context_images = [
+                        img for img, assigned_to in image_assignments.items()
+                        if assigned_to == context_source
+                    ]
+                    stats["images_copied"] += len(context_images)
+
+    # Ensure all questions have is_context_only set
+    for ch_key, ch_questions in questions.items():
+        for q in ch_questions:
+            if "is_context_only" not in q:
+                q["is_context_only"] = False
+
+    logger.info(
+        f"Applied extracted context: {stats['context_questions_found']} context questions, "
+        f"{stats['sub_questions_updated']} sub-questions updated"
+    )
+
+    return questions, updated_assignments, stats
 
 
 def associate_context_llm(client, questions: dict, image_assignments: dict,
