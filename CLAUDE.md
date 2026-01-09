@@ -8,7 +8,7 @@ Textbook Question Extractor - A Python pipeline for extracting Q&A pairs from PD
 
 ## Architecture
 
-### Six-Step Pipeline
+### Multi-Step Pipeline
 
 ```
 PDF Input
@@ -28,18 +28,26 @@ STEP 3: EXTRACT QUESTIONS
 ├── Image matching: Use flanking text to assign images to questions
 └── Output: questions_by_chapter.json + image_assignments.json
     ↓
-STEP 4: ASSOCIATE CONTEXT
+STEP 4: FORMAT QUESTIONS (optional)
+├── Two-pass extraction: line ranges first, then detailed formatting
+└── Output: raw_questions.json (line ranges + extracted text)
+    ↓
+STEP 5: ASSOCIATE CONTEXT
 ├── LLM identifies context-only questions (clinical scenarios without choices)
 ├── Merges context text into sub-questions (e.g., Q1 context → Q1a, Q1b, Q1c)
 ├── Sub-questions inherit images via context_from field
 └── Output: questions_merged.json + image_assignments_merged.json
     ↓
-STEP 5: QC QUESTIONS
+STEP 6: QC QUESTIONS
 ├── Streamlit GUI: Review/correct assignments
 ├── Approve/flag questions, reassign images
 └── Output: qc_progress.json
     ↓
-STEP 6: EXPORT
+STEP 7: GENERATE (optional)
+├── Generate cloze deletion cards from explanations
+└── Output: generated_questions.json
+    ↓
+STEP 8: EXPORT
 └── Output: .apkg file (importable to Anki)
 ```
 
@@ -95,15 +103,21 @@ All state is persisted to JSON files in `output/<textbook_name>/`:
 | `image_assignments_merged.json` | Image assignments after context association |
 | `qc_progress.json` | QC review status per question |
 | `settings.json` | UI state (selected model, current step, QC position) |
+| `raw_questions.json` | Line ranges + extracted text from two-pass extraction |
+| `generated_questions.json` | Generated cloze deletion cards |
+| `extraction.log` | Debug log for LLM extraction operations |
 
 ## Key Design Patterns
 
 ### Editable Prompts (config/prompts.yaml)
 All LLM prompts are stored in YAML for easy editing without code changes:
 - `identify_chapters` - Find chapter boundaries
-- `extract_qa_pairs` - Extract questions and answers
+- `extract_qa_pairs` - Extract questions and answers (single-pass)
+- `extract_line_ranges` - First pass: identify line ranges for each Q&A pair
+- `format_qa_pair` - Second pass: format individual Q&A pairs
 - `match_images_to_questions` - Assign images using flanking text
 - `associate_context` - Link context questions to sub-questions
+- `generate_cloze_cards` - Generate cloze deletion flashcards from explanations
 
 ### Dynamic Model Selection
 - Models fetched from Anthropic API via `client.models.list()`
@@ -171,9 +185,24 @@ response = client.messages.create(
 ## Dependencies
 
 - Python 3.12+
-- `pymupdf` - PDF text and image extraction
+- `pymupdf` - PDF text and image extraction (import as `fitz`)
+- `docling` - PDF to Markdown conversion
 - `anthropic` - Claude API client
 - `streamlit` - Interactive GUI
 - `genanki` - Anki deck generation
 - `python-dotenv` - Environment variable loading
-- `pyyaml` - Prompt configuration loading
+- `pyyaml` - Prompt configuration loading (import as `yaml`)
+- `pillow` - Image processing for Streamlit
+
+## Debugging
+
+### Extraction Logs
+LLM extraction operations are logged to `output/<textbook>/extraction.log`:
+- Console shows warnings/errors only
+- Log file contains full DEBUG output with timestamps
+- Use `get_extraction_logger(output_dir)` to initialize logging for a textbook
+
+### Common Issues
+- **Images not matching**: Check flanking text in `images.json` - the text before each image should end with a question number
+- **Missing questions**: Review `raw_questions.json` line ranges to verify extraction boundaries
+- **Context not merging**: Questions need matching `image_group` fields and context must have empty `choices`

@@ -179,22 +179,25 @@ associate_context:
     - has_correct_answer: Whether a correct answer was identified
     - has_explanation: Whether an explanation/answer text exists
 
-    STRONG SIGNALS THAT SOMETHING IS A REAL QUESTION (NOT context):
-    - has_choices: true AND num_choices >= 2
-    - has_correct_answer: true
-    - has_explanation: true
-    - Text contains "Which of the following", "What is", or similar question patterns
+    ABSOLUTE RULE - NEVER VIOLATE THIS:
+    A question with has_choices: true can NEVER be a context_id.
+    Context entries MUST have has_choices: false and num_choices: 0.
+    If a question has answer choices (A/B/C/D), it is a REAL QUESTION, not context.
 
-    STRONG SIGNALS THAT SOMETHING IS CONTEXT:
-    - has_choices: false AND num_choices: 0
-    - has_correct_answer: false
-    - Text describes a scenario, patient history, or clinical situation
-    - Followed by related questions that reference it
+    COMMON MISTAKE TO AVOID:
+    Questions like "2a" and "2b" are often BOTH real questions that happen to share a clinical
+    scenario in their text. Do NOT assume "2a" is context for "2b" just because of the naming.
+    Look at has_choices - if BOTH have choices, NEITHER is context. They are independent questions.
 
-    CRITICAL:
-    - Be CONSERVATIVE - only create mappings when you're confident
-    - A question with has_choices: true, has_correct_answer: true, and has_explanation: true is almost certainly a real question, NOT context
-    - If unsure, return an empty mappings array
+    VALID CONTEXT PATTERN:
+    - Question "5" has has_choices: false, num_choices: 0 (just a scenario, no A/B/C/D)
+    - Questions "5a", "5b", "5c" have has_choices: true (actual questions with choices)
+    - In this case, "5" IS context for "5a", "5b", "5c"
+
+    INVALID - DO NOT CREATE:
+    - Question "2a" has has_choices: true, num_choices: 4
+    - Question "2b" has has_choices: true, num_choices: 4
+    - Both are real questions. Do NOT mark "2a" as context for "2b".
 
     QUESTIONS:
     {questions_summary}
