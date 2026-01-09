@@ -409,6 +409,24 @@ def format_qa_pair_llm(
                     "error": f"Rate limit exceeded: {e}"
                 }
 
+        except anthropic.APIStatusError as e:
+            # Retry on 500, 502, 503, 504 errors (server-side issues)
+            if e.status_code >= 500 and attempt < max_retries:
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: API error {e.status_code}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: API error {e.status_code} after {attempt + 1} attempts - {e}")
+                return {
+                    "id": question_id,
+                    "text": question_text,
+                    "choices": {},
+                    "has_image": False,
+                    "correct_answer": "",
+                    "explanation": answer_text,
+                    "error": str(e)
+                }
+
         except json.JSONDecodeError as e:
             logger.error(f"{log_prefix}: JSON parse error - {e}")
             return {
@@ -422,16 +440,23 @@ def format_qa_pair_llm(
             }
 
         except Exception as e:
-            logger.error(f"{log_prefix}: API error - {type(e).__name__}: {e}")
-            return {
-                "id": question_id,
-                "text": question_text,
-                "choices": {},
-                "has_image": False,
-                "correct_answer": "",
-                "explanation": answer_text,
-                "error": str(e)
-            }
+            # Retry on connection errors and other transient issues
+            error_name = type(e).__name__
+            if attempt < max_retries and error_name in ('ConnectionError', 'TimeoutError', 'APIConnectionError'):
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: {error_name}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: {error_name} after {attempt + 1} attempts - {e}")
+                return {
+                    "id": question_id,
+                    "text": question_text,
+                    "choices": {},
+                    "has_image": False,
+                    "correct_answer": "",
+                    "explanation": answer_text,
+                    "error": str(e)
+                }
 
 
 def extract_qa_pairs_two_pass(
@@ -1534,8 +1559,25 @@ def generate_cloze_cards_llm(
                 logger.error(f"{log_prefix}: Rate limit exceeded after {max_retries} retries")
                 return []
 
+        except anthropic.APIStatusError as e:
+            # Retry on 500, 502, 503, 504 errors (server-side issues)
+            if e.status_code >= 500 and attempt < max_retries:
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: API error {e.status_code}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: API error {e.status_code} after {attempt + 1} attempts - {e}")
+                return []
+
         except Exception as e:
-            logger.error(f"{log_prefix}: API error - {type(e).__name__}: {e}")
-            return []
+            # Retry on connection errors and other transient issues
+            error_name = type(e).__name__
+            if attempt < max_retries and error_name in ('ConnectionError', 'TimeoutError', 'APIConnectionError'):
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: {error_name}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: {error_name} after {attempt + 1} attempts - {e}")
+                return []
 
     return []
