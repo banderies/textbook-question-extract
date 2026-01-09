@@ -3251,10 +3251,33 @@ def render_generate_step():
 
     st.markdown("---")
 
-    # Generation controls
-    col1, col2, col3 = st.columns([2, 1.5, 2])
+    # Chapter selector
+    if not st.session_state.chapters:
+        st.warning("No chapters available. Please extract chapters first (Step 2)")
+        return
 
-    with col1:
+    chapter_options = [f"Ch{ch['chapter_number']}: {ch['title'][:40]}..."
+                      for ch in st.session_state.chapters]
+    selected_ch_idx = st.selectbox("Select chapter:",
+                                    range(len(chapter_options)),
+                                    format_func=lambda x: chapter_options[x],
+                                    key="generate_ch_selector")
+
+    selected_ch = st.session_state.chapters[selected_ch_idx]
+    selected_ch_num = selected_ch["chapter_number"]
+    selected_ch_key = f"ch{selected_ch_num}"
+
+    # Count questions with explanations for selected chapter
+    ch_questions_with_explanations = [
+        (ch_key, ch_num, q) for ch_key, ch_num, q in all_questions
+        if ch_key == selected_ch_key
+    ]
+    ch_question_count = len(ch_questions_with_explanations)
+
+    # Generation controls
+    model_col, workers_col, btn_col1, btn_col2 = st.columns([2, 1.5, 2, 2])
+
+    with model_col:
         model_options = get_model_options()
         current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
         selected_model = st.selectbox("Model:", model_options, index=current_idx, key="generate_model")
@@ -3262,7 +3285,7 @@ def render_generate_step():
             st.session_state.selected_model = selected_model
             save_settings()
 
-    with col2:
+    with workers_col:
         gen_workers = st.number_input(
             "Parallel workers:",
             min_value=1, max_value=50, value=20,
@@ -3270,10 +3293,98 @@ def render_generate_step():
             help="Number of questions to process in parallel"
         )
 
-    with col3:
-        generate_all = st.button("Generate ALL Cards", type="primary", key="gen_all_btn")
+    with btn_col1:
+        generate_chapter = st.button(
+            f"Generate Chapter {selected_ch_num} ({ch_question_count})",
+            type="primary",
+            key="gen_chapter_btn",
+            disabled=ch_question_count == 0
+        )
 
-    # Generation logic
+    with btn_col2:
+        generate_all = st.button("Generate ALL Cards", type="secondary", key="gen_all_btn")
+
+    # Single chapter generation logic
+    if generate_chapter:
+        if ch_question_count == 0:
+            st.warning(f"No questions with explanations in Chapter {selected_ch_num}")
+        else:
+            model_id = get_selected_model_id()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            # Initialize generated_questions structure
+            if not st.session_state.generated_questions.get("metadata"):
+                st.session_state.generated_questions["metadata"] = {
+                    "created_at": datetime.now().isoformat(),
+                    "model_used": model_id,
+                    "total_generated": 0,
+                    "source_questions_processed": 0
+                }
+            if "generated_cards" not in st.session_state.generated_questions:
+                st.session_state.generated_questions["generated_cards"] = {}
+
+            # Clear existing cards for this chapter
+            if selected_ch_key in st.session_state.generated_questions["generated_cards"]:
+                st.session_state.generated_questions["generated_cards"][selected_ch_key] = []
+
+            completed = 0
+            total_cards_generated = 0
+
+            def process_question(item):
+                ch_key, ch_num, q = item
+                cards = generate_cloze_cards_llm(client, q, ch_num, model_id)
+                return ch_key, q, cards
+
+            with ThreadPoolExecutor(max_workers=gen_workers) as executor:
+                futures = {executor.submit(process_question, item): item for item in ch_questions_with_explanations}
+
+                for future in as_completed(futures):
+                    ch_key, q, cards = future.result()
+                    completed += 1
+
+                    if cards:
+                        # Initialize chapter list if needed
+                        if ch_key not in st.session_state.generated_questions["generated_cards"]:
+                            st.session_state.generated_questions["generated_cards"][ch_key] = []
+
+                        # Build card objects
+                        for i, card in enumerate(cards, 1):
+                            full_card = {
+                                "generated_id": f"{q['full_id']}_gen_{i}",
+                                "source_question_id": q["full_id"],
+                                "cloze_text": card.get("cloze_text", ""),
+                                "learning_point": card.get("learning_point", ""),
+                                "confidence": card.get("confidence", "medium"),
+                                "category": card.get("category", "")
+                            }
+                            st.session_state.generated_questions["generated_cards"][ch_key].append(full_card)
+                            total_cards_generated += 1
+
+                    # Update progress
+                    progress = completed / ch_question_count
+                    progress_bar.progress(progress)
+                    status_text.text(f"Chapter {selected_ch_num}: {completed}/{ch_question_count} questions | {total_cards_generated} cards generated")
+
+                    # Save periodically (every 10 questions)
+                    if completed % 10 == 0:
+                        st.session_state.generated_questions["metadata"]["total_generated"] = sum(
+                            len(cards) for cards in st.session_state.generated_questions["generated_cards"].values()
+                        )
+                        save_generated_questions()
+
+            # Final save
+            st.session_state.generated_questions["metadata"]["total_generated"] = sum(
+                len(cards) for cards in st.session_state.generated_questions["generated_cards"].values()
+            )
+            save_generated_questions()
+
+            progress_bar.progress(1.0)
+            status_text.text(f"Complete: {completed} questions processed, {total_cards_generated} cards generated")
+            st.success(f"Generated {total_cards_generated} cloze cards from {completed} questions in Chapter {selected_ch_num}!")
+            st.rerun()
+
+    # All chapters generation logic
     if generate_all:
         if total_with_explanations == 0:
             st.warning("No questions with explanations found to process")
@@ -3439,9 +3550,11 @@ def render_generate_step():
 
                 # Display cloze with visual highlighting
                 cloze_text = card.get("cloze_text", "")
-                # Convert {{c1::text}} to **[text]** for visual display
                 import re
-                display_text = re.sub(r'\{\{c\d+::([^}]+)\}\}', r'**[\1]**', cloze_text)
+                # Convert {{c1::text::hint}} to **[text]** for visual display (strip hint if present)
+                display_text = re.sub(r'\{\{c\d+::([^:}]+)(?:::[^}]+)?\}\}', r'**[\1]**', cloze_text)
+                # Convert <b>...</b> to **...** for Markdown bold rendering
+                display_text = re.sub(r'<b>([^<]+)</b>', r'**\1**', display_text)
                 st.markdown(f"**Cloze:**")
                 st.markdown(display_text)
 
@@ -3458,7 +3571,9 @@ def render_generate_step():
                 if len(same_source_cards) > 1:
                     with st.expander(f"All {len(same_source_cards)} cards from this source"):
                         for i, sc in enumerate(same_source_cards, 1):
-                            display = re.sub(r'\{\{c\d+::([^}]+)\}\}', r'[\1]', sc.get("cloze_text", ""))
+                            # Convert cloze syntax (with optional hint) and <b> tags for display
+                            display = re.sub(r'\{\{c\d+::([^:}]+)(?:::[^}]+)?\}\}', r'**[\1]**', sc.get("cloze_text", ""))
+                            display = re.sub(r'<b>([^<]+)</b>', r'**\1**', display)
                             st.markdown(f"{i}. {display}")
 
 

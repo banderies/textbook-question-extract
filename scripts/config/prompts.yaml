@@ -381,57 +381,165 @@ generate_cloze_cards:
     EXPLANATION TEXT (from {question_id}):
     {explanation}
 
-    TASK: Extract key learning points and create cloze deletion cards.
+    TASK: Extract ALL distinct facts and concepts as cloze deletion cards.
 
-    CLOZE SYNTAX RULES:
-    1. Use {{{{c1::text::hint}}}} format - ALWAYS include a hint that describes the semantic category
-    2. BOLD all cloze deletions using <b> tags for visual emphasis
-    3. Each card tests ONE key fact or relationship
-    4. Related facts can use c1, c2, c3 on the same card
-    5. Keep surrounding context for meaning
+    ============================================================
+    CORE PRINCIPLE: MINIMUM INFORMATION
+    ============================================================
+    Each card tests ONE atomic fact. If a sentence contains multiple learnable facts,
+    create MULTIPLE cards. The source material is extremely high-density - err on the
+    side of creating MORE cards rather than fewer. A single explanation may yield
+    1-2 cards (if brief) or 20+ cards (if detailed). Let the content dictate the count.
 
-    HINT CATEGORIES (use these or similar descriptive hints):
+    Card quality checklist:
+    - Does this card test exactly ONE fact? If not, split it.
+    - Is the sentence as SHORT as possible while retaining meaning?
+    - Does the context constrain the answer to one reasonable response?
+    - Would a student need to truly recall this, not just recognize it?
+
+    ============================================================
+    CLOZE SYNTAX RULES (NOTES vs CARDS)
+    ============================================================
+    IMPORTANT: Understand the difference between NOTES and CARDS in Anki:
+    - A NOTE is one item in your JSON output (one cloze_text)
+    - A note with {{{{c1::X}}}} and {{{{c2::Y}}}} generates TWO CARDS automatically
+    - Card 1 hides X (shows Y), Card 2 hides Y (shows X)
+
+    RULE: If multiple testable facts come from the SAME sentence or tightly related
+    concept, put them on ONE note using c1, c2, c3. Do NOT create separate notes.
+
+    BAD - Three separate notes for related facts:
+    Note 1: "<b>{{{{c1::Mazabraud syndrome::syndrome}}}}</b> combines intramuscular myxomas and fibrous dysplasia."
+    Note 2: "Mazabraud syndrome combines <b>{{{{c1::intramuscular myxomas::condition}}}}</b> and fibrous dysplasia."
+    Note 3: "Mazabraud syndrome combines intramuscular myxomas and <b>{{{{c1::fibrous dysplasia::condition}}}}</b>."
+
+    GOOD - One note with three clozes (generates 3 cards):
+    "<b>{{{{c1::Mazabraud syndrome::syndrome}}}}</b> combines <b>{{{{c2::intramuscular myxomas::condition}}}}</b> and <b>{{{{c3::fibrous dysplasia::condition}}}}</b>."
+
+    SYNTAX RULES:
+    1. Use {{{{c1::text::hint}}}} format - ALWAYS include a semantic hint
+    2. BOLD all cloze deletions using <b> tags
+    3. BOLD important non-clozed terms (diagnoses, structures, key findings) for visual emphasis
+    4. Use c1, c2, c3 on SAME note for facts from the same sentence/concept
+    5. Create SEPARATE notes only for unrelated facts or different sentences
+    6. Keep sentences SHORT - front-load the topic/category for context
+
+    HINT CATEGORIES (use these or similar):
     - Anatomical: structure, location, region, pathway, vessel, nerve, muscle, bone
     - Clinical: finding, symptom, sign, presentation, complication
     - Diagnostic: technique, modality, imaging finding, test, criteria
-    - Pathology: condition, disease, pathology, mechanism, etiology
-    - Quantitative: percentage, number, measurement, duration, age
-    - Comparative: difference, feature, characteristic
+    - Pathology: condition, disease, mechanism, etiology, cause
+    - Quantitative: percentage, number, measurement, duration, age, frequency
+    - Comparative: difference, feature, characteristic, distinguishing feature
 
-    GOOD EXAMPLES (note the hints and bolding):
-    - "<b>{{{{c1::Radiography::technique}}}}</b> is insensitive in detecting <b>{{{{c2::early bone loss::finding}}}}</b>."
+    ============================================================
+    WHAT TO EXTRACT (create a card for each)
+    ============================================================
+    - Every specific term, name, or diagnosis mentioned
+    - Every number, percentage, or statistic
+    - Every anatomical relationship (X is located in Y, X innervates Y)
+    - Every causal relationship (X causes Y, X leads to Y)
+    - Every distinguishing feature in differentials
+    - Every imaging finding or diagnostic criterion
+    - Every mechanism or pathway step
+    - Every clinical presentation or symptom association
+    - Every treatment or management point
+
+    ============================================================
+    GOOD EXAMPLES (with proper note structure and bolding)
+    ============================================================
+    SINGLE-CLOZE NOTES (for isolated facts):
+    - "<b>Brainstem gliomas</b> account for <b>{{{{c1::10-20%::percentage}}}}</b> of pediatric intracranial tumors."
+    - "<b>{{{{c1::DNET::diagnosis}}}}</b> most commonly occurs in the <b>temporal lobe</b>."
+    - "<b>Radiography</b> is <b>{{{{c1::insensitive::limitation}}}}</b> for detecting early <b>bone loss</b>."
+
+    MULTI-CLOZE NOTES (for related facts from same concept - generates multiple cards):
     - "The <b>{{{{c1::foramen spinosum::structure}}}}</b> transmits the <b>{{{{c2::middle meningeal artery::vessel}}}}</b>."
-    - "<b>{{{{c1::DNET::diagnosis}}}}</b> commonly presents with <b>{{{{c2::intractable seizures::symptom}}}}</b> in the <b>{{{{c3::temporal lobe::location}}}}</b>."
-    - "Brainstem gliomas account for <b>{{{{c1::10% to 20%::percentage}}}}</b> of all intracranial tumors in children."
-    - "<b>{{{{c1::Ganglioglioma::diagnosis}}}}</b> differs from DNET in that <b>{{{{c2::calcification::finding}}}}</b> and <b>{{{{c3::contrast enhancement::finding}}}}</b> are more common."
-    - "The <b>{{{{c1::MRI::modality}}}}</b> finding of <b>{{{{c2::T2 hyperintensity::signal}}}}</b> suggests <b>{{{{c3::edema::pathology}}}}</b>."
+      (One note → 2 cards: one tests structure, one tests vessel)
 
-    BAD EXAMPLES (avoid):
-    - "The answer is {{{{c1::C}}}}." (too trivial, no hint, not bolded)
-    - "{{{{c1::This}}}} is common." (unclear reference)
-    - "The {{{{c1::patient}}}} presented with symptoms." (too generic)
+    - "<b>{{{{c1::DNET::diagnosis}}}}</b> presents with <b>{{{{c2::intractable seizures::symptom}}}}</b> in the <b>{{{{c3::temporal lobe::location}}}}</b>."
+      (One note → 3 cards)
+
+    - "<b>{{{{c1::Ganglioglioma::diagnosis}}}}</b> differs from <b>DNET</b> by more frequent <b>{{{{c2::calcification::finding}}}}</b> and <b>{{{{c3::contrast enhancement::finding}}}}</b>."
+      (One note → 3 cards, with DNET bolded but not clozed for context)
+
+    - "<b>{{{{c1::Intraosseous lipomas::diagnosis}}}}</b> are <b>{{{{c2::benign::behavior}}}}</b> fatty tumors of <b>bone</b>."
+      (One note → 2 cards)
+
+    Notice: Bold ALL key medical terms for visual scanning, whether clozed or not.
+    When facts are from the same sentence, combine into one note with c1, c2, c3.
+
+    ============================================================
+    CRITICAL: STANDALONE CONTEXT
+    ============================================================
+    Cards will be reviewed randomly mixed with cards from OTHER topics and chapters.
+    The NON-clozed text must provide enough context to identify the domain/topic.
+
+    Ask yourself: "If a student sees this card mixed with 1000 other cards from
+    different subjects, can they tell what field/topic this is about?"
+
+    BAD - No context to constrain the answer:
+    - "<b>{{{{c1::Intraosseous lipomas::diagnosis}}}}</b> are benign lesions."
+      Problem: "[diagnosis] are benign lesions" - hundreds of things are benign!
+      The student has no idea this is about bone tumors.
+
+    GOOD - Context anchors the topic:
+    - "<b>{{{{c1::Intraosseous lipomas::diagnosis}}}}</b> are benign fatty bone tumors."
+    - "In bone radiology, <b>{{{{c1::intraosseous lipomas::diagnosis}}}}</b> are benign lesions."
+
+    BAD - Generic context:
+    - "<b>{{{{c1::Chordoma::diagnosis}}}}</b> is a malignant tumor."
+      Problem: Malignant tumor of what? Brain? Bone? Soft tissue?
+
+    GOOD - Specific context:
+    - "<b>{{{{c1::Chordoma::diagnosis}}}}</b> is a malignant tumor arising from notochord remnants."
+    - "Sacral/clival tumors: <b>{{{{c1::Chordoma::diagnosis}}}}</b> arises from notochord remnants."
+
+    The rule: Include at least ONE specific anchor (organ system, location, imaging
+    modality, patient population, or distinguishing feature) in the non-clozed text.
+
+    ============================================================
+    BAD EXAMPLES (avoid these patterns)
+    ============================================================
+    - "The answer is {{{{c1::C}}}}." (trivial, no educational value)
+    - "{{{{c1::This}}}} is a common finding." (orphan cloze, no context)
+    - "The {{{{c1::patient}}}} had symptoms." (generic, not specific)
     - "{{{{c1::Radiographs}}}} detect bone loss." (missing hint and bold)
+    - "The {{{{c1::foramen spinosum::structure}}}} transmits the {{{{c2::middle meningeal artery::vessel}}}}." (not bolded)
+    - Long sentence with buried cloze (keep it short, front-load context)
+    - "<b>{{{{c1::X::diagnosis}}}}</b> is benign/malignant." (no organ system or context)
 
-    QUALITY GUIDELINES:
-    - ALWAYS include a descriptive hint after :: in every cloze deletion
-    - ALWAYS wrap cloze deletions in <b></b> tags for visual emphasis
-    - Focus on: anatomical structures, pathways, clinical findings, diagnostic criteria, percentages/statistics, differential diagnosis features
-    - Extract 2-8 high-quality cards per explanation (more for longer explanations)
-    - Skip citations, references, and non-educational filler
-    - Each card should stand alone without needing the original question
-    - For differential diagnoses, create cards that highlight distinguishing features
-    - Include specific numbers, percentages, and measurements when present
+    ============================================================
+    GUIDELINES
+    ============================================================
+    - Create as MANY cards as needed to capture ALL distinct facts
+    - Prefer multiple simple cards over fewer complex cards
+    - Each card should stand alone without the original question
+    - Skip only: citations, references, question-specific phrasing ("In this case...")
+    - When in doubt, make a card - more coverage is better
 
     Return ONLY a JSON array (no other text):
     [
       {{
         "cloze_text": "The <b>{{{{c1::foramen spinosum::structure}}}}</b> transmits the <b>{{{{c2::middle meningeal artery::vessel}}}}</b>.",
-        "learning_point": "Foramen spinosum contents",
+        "learning_point": "Foramen spinosum anatomy",
         "confidence": "high",
         "category": "anatomy"
+      }},
+      {{
+        "cloze_text": "<b>{{{{c1::Mazabraud syndrome::syndrome}}}}</b> combines <b>{{{{c2::intramuscular myxomas::condition}}}}</b> and <b>{{{{c3::fibrous dysplasia::condition}}}}</b>.",
+        "learning_point": "Mazabraud syndrome components",
+        "confidence": "high",
+        "category": "pathology"
+      }},
+      {{
+        "cloze_text": "<b>Brainstem gliomas</b> account for <b>{{{{c1::10-20%::percentage}}}}</b> of pediatric <b>intracranial tumors</b>.",
+        "learning_point": "Brainstem glioma epidemiology",
+        "confidence": "high",
+        "category": "statistics"
       }}
     ]
 
-    Categories to use: anatomy, pathology, imaging, clinical, differential, statistics
+    Categories: anatomy, pathology, imaging, clinical, differential, statistics, mechanism
 
     If no suitable content for cloze cards, return: []
