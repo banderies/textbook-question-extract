@@ -1387,8 +1387,6 @@ def generate_cloze_cards_llm(
     prompt = get_prompt(
         "generate_cloze_cards",
         question_id=q_id,
-        question_text=question.get("text", "")[:500],
-        correct_answer=question.get("correct_answer", ""),
         explanation=explanation
     )
 

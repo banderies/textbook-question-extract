@@ -327,12 +327,7 @@ generate_cloze_cards:
   prompt: |
     You are creating Anki cloze deletion flashcards from a medical textbook explanation.
 
-    SOURCE QUESTION:
-    - Question ID: {question_id}
-    - Question: {question_text}
-    - Correct Answer: {correct_answer}
-
-    EXPLANATION TO PROCESS:
+    EXPLANATION TEXT (from {question_id}):
     {explanation}
 
     TASK: Extract key learning points and create cloze deletion cards.
@@ -367,7 +362,6 @@ generate_cloze_cards:
       {{
         "cloze_text": "The {{{{c1::foramen spinosum}}}} transmits the {{{{c2::middle meningeal artery}}}}.",
         "learning_point": "Foramen spinosum contents",
-        "explanation_excerpt": "The specific sentence or phrase this was derived from.",
         "confidence": "high",
         "category": "anatomy"
       }}

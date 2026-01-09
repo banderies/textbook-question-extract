@@ -3085,25 +3085,15 @@ def render_generate_step():
                         if ch_key not in st.session_state.generated_questions["generated_cards"]:
                             st.session_state.generated_questions["generated_cards"][ch_key] = []
 
-                        # Build full card objects with source context
+                        # Build card objects (source data is looked up from questions_merged)
                         for i, card in enumerate(cards, 1):
                             full_card = {
                                 "generated_id": f"{q['full_id']}_gen_{i}",
                                 "source_question_id": q["full_id"],
-                                "source_chapter": ch_key,
                                 "cloze_text": card.get("cloze_text", ""),
                                 "learning_point": card.get("learning_point", ""),
-                                "source_context": {
-                                    "question_text": q.get("text", "")[:500],
-                                    "correct_answer": q.get("correct_answer", ""),
-                                    "explanation_excerpt": card.get("explanation_excerpt", ""),
-                                    "image_files": q.get("image_files", [])
-                                },
-                                "generation_metadata": {
-                                    "created_at": datetime.now().isoformat(),
-                                    "confidence": card.get("confidence", "medium"),
-                                    "category": card.get("category", "")
-                                }
+                                "confidence": card.get("confidence", "medium"),
+                                "category": card.get("category", "")
                             }
                             st.session_state.generated_questions["generated_cards"][ch_key].append(full_card)
                             total_cards_generated += 1
@@ -3187,34 +3177,34 @@ def render_generate_step():
                     st.session_state.gen_preview_idx += 1
                     st.rerun()
 
+            # Look up source question from questions_merged
+            source_q_id = card["source_question_id"]
+            source_q = None
+            # Parse chapter from question ID (e.g., "ch1_12b" -> "ch1")
+            if "_" in source_q_id:
+                source_ch_key = source_q_id.split("_")[0]
+                ch_questions = questions_source.get(source_ch_key, [])
+                for q in ch_questions:
+                    if q.get("full_id") == source_q_id:
+                        source_q = q
+                        break
+
             # Side-by-side display
             left_col, right_col = st.columns(2)
 
             with left_col:
-                st.markdown("#### Source Material")
-                source_ctx = card.get("source_context", {})
+                st.markdown("#### Source")
+                st.markdown(f"**Question ID:** `{source_q_id}`")
 
-                st.markdown(f"**Question:** `{card['source_question_id']}`")
-                q_text = source_ctx.get("question_text", "N/A")
-                if len(q_text) > 300:
-                    q_text = q_text[:300] + "..."
-                st.markdown(q_text)
-
-                # Show image if available
-                if source_ctx.get("image_files"):
-                    for img_file in source_ctx["image_files"][:1]:
-                        img_path = os.path.join(get_images_dir(), img_file)
-                        if os.path.exists(img_path):
-                            st.image(img_path, width=300)
-
-                st.markdown(f"**Correct Answer:** {source_ctx.get('correct_answer', 'N/A')}")
-
-                st.markdown("**Explanation Excerpt:**")
-                excerpt = source_ctx.get("explanation_excerpt", "")
-                if excerpt:
-                    st.text_area("", excerpt, height=150, disabled=True, key=f"src_exp_{current_idx}")
+                if source_q:
+                    # Show full explanation text as the source reference
+                    explanation = source_q.get("explanation", "")
+                    if explanation:
+                        st.text_area("Explanation (source):", explanation, height=300, disabled=True, key=f"src_exp_{current_idx}")
+                    else:
+                        st.caption("No explanation available")
                 else:
-                    st.caption("No excerpt available")
+                    st.warning("Source question not found")
 
             with right_col:
                 st.markdown("#### Generated Cloze Card")
@@ -3229,12 +3219,11 @@ def render_generate_step():
 
                 st.markdown(f"**Learning Point:** {card.get('learning_point', 'N/A')}")
 
-                gen_meta = card.get("generation_metadata", {})
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    st.markdown(f"**Confidence:** {gen_meta.get('confidence', 'N/A')}")
+                    st.markdown(f"**Confidence:** {card.get('confidence', 'N/A')}")
                 with col_b:
-                    st.markdown(f"**Category:** {gen_meta.get('category', 'N/A')}")
+                    st.markdown(f"**Category:** {card.get('category', 'N/A')}")
 
                 # Show all cards from same source
                 same_source_cards = [c for _, c in filtered_cards if c["source_question_id"] == card["source_question_id"]]
