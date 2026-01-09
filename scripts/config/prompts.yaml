@@ -384,23 +384,37 @@ generate_cloze_cards:
     TASK: Extract key learning points and create cloze deletion cards.
 
     CLOZE SYNTAX RULES:
-    1. Use {{{{c1::text}}}} for deletions (double braces required in output)
-    2. Each card tests ONE key fact or relationship
-    3. Related facts can use c1, c2, c3 on the same card
-    4. Keep surrounding context for meaning
+    1. Use {{{{c1::text::hint}}}} format - ALWAYS include a hint that describes the semantic category
+    2. BOLD all cloze deletions using <b> tags for visual emphasis
+    3. Each card tests ONE key fact or relationship
+    4. Related facts can use c1, c2, c3 on the same card
+    5. Keep surrounding context for meaning
 
-    GOOD EXAMPLES:
-    - "The {{{{c1::foramen spinosum}}}} transmits the {{{{c2::middle meningeal artery}}}}."
-    - "{{{{c1::DNET}}}} commonly presents with {{{{c2::intractable seizures}}}} in the {{{{c3::temporal lobe}}}}."
-    - "Brainstem gliomas account for {{{{c1::10% to 20%}}}} of all intracranial tumors in children."
-    - "{{{{c1::Ganglioglioma}}}} differs from DNET in that {{{{c2::calcification}}}} and {{{{c3::contrast enhancement}}}} are more common."
+    HINT CATEGORIES (use these or similar descriptive hints):
+    - Anatomical: structure, location, region, pathway, vessel, nerve, muscle, bone
+    - Clinical: finding, symptom, sign, presentation, complication
+    - Diagnostic: technique, modality, imaging finding, test, criteria
+    - Pathology: condition, disease, pathology, mechanism, etiology
+    - Quantitative: percentage, number, measurement, duration, age
+    - Comparative: difference, feature, characteristic
+
+    GOOD EXAMPLES (note the hints and bolding):
+    - "<b>{{{{c1::Radiography::technique}}}}</b> is insensitive in detecting <b>{{{{c2::early bone loss::finding}}}}</b>."
+    - "The <b>{{{{c1::foramen spinosum::structure}}}}</b> transmits the <b>{{{{c2::middle meningeal artery::vessel}}}}</b>."
+    - "<b>{{{{c1::DNET::diagnosis}}}}</b> commonly presents with <b>{{{{c2::intractable seizures::symptom}}}}</b> in the <b>{{{{c3::temporal lobe::location}}}}</b>."
+    - "Brainstem gliomas account for <b>{{{{c1::10% to 20%::percentage}}}}</b> of all intracranial tumors in children."
+    - "<b>{{{{c1::Ganglioglioma::diagnosis}}}}</b> differs from DNET in that <b>{{{{c2::calcification::finding}}}}</b> and <b>{{{{c3::contrast enhancement::finding}}}}</b> are more common."
+    - "The <b>{{{{c1::MRI::modality}}}}</b> finding of <b>{{{{c2::T2 hyperintensity::signal}}}}</b> suggests <b>{{{{c3::edema::pathology}}}}</b>."
 
     BAD EXAMPLES (avoid):
-    - "The answer is {{{{c1::C}}}}." (too trivial)
+    - "The answer is {{{{c1::C}}}}." (too trivial, no hint, not bolded)
     - "{{{{c1::This}}}} is common." (unclear reference)
     - "The {{{{c1::patient}}}} presented with symptoms." (too generic)
+    - "{{{{c1::Radiographs}}}} detect bone loss." (missing hint and bold)
 
     QUALITY GUIDELINES:
+    - ALWAYS include a descriptive hint after :: in every cloze deletion
+    - ALWAYS wrap cloze deletions in <b></b> tags for visual emphasis
     - Focus on: anatomical structures, pathways, clinical findings, diagnostic criteria, percentages/statistics, differential diagnosis features
     - Extract 2-8 high-quality cards per explanation (more for longer explanations)
     - Skip citations, references, and non-educational filler
@@ -411,7 +425,7 @@ generate_cloze_cards:
     Return ONLY a JSON array (no other text):
     [
       {{
-        "cloze_text": "The {{{{c1::foramen spinosum}}}} transmits the {{{{c2::middle meningeal artery}}}}.",
+        "cloze_text": "The <b>{{{{c1::foramen spinosum::structure}}}}</b> transmits the <b>{{{{c2::middle meningeal artery::vessel}}}}</b>.",
         "learning_point": "Foramen spinosum contents",
         "confidence": "high",
         "category": "anatomy"
