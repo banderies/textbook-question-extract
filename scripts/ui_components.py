@@ -1641,10 +1641,30 @@ def render_format_step():
 
     st.info(f"Raw Q&A pairs: {total_raw} | Formatted: {total_formatted}")
 
-    # Model selection and parallel workers
-    col1, col2, col3 = st.columns([2, 2, 2])
+    # Chapter selector
+    if not st.session_state.chapters:
+        st.warning("No chapters available. Please extract chapters first (Step 2)")
+        return
 
-    with col1:
+    chapter_options = [f"Ch{ch['chapter_number']}: {ch['title'][:40]}..."
+                      for ch in st.session_state.chapters]
+    selected_ch_idx = st.selectbox("Select chapter:",
+                                    range(len(chapter_options)),
+                                    format_func=lambda x: chapter_options[x],
+                                    key="format_ch_selector")
+
+    selected_ch = st.session_state.chapters[selected_ch_idx]
+    selected_ch_num = selected_ch["chapter_number"]
+    selected_ch_key = f"ch{selected_ch_num}"
+
+    # Count raw questions for selected chapter
+    ch_raw_questions = raw_questions.get(selected_ch_key, [])
+    ch_raw_count = len(ch_raw_questions)
+
+    # Model selection and parallel workers
+    model_col, workers_col, btn_col1, btn_col2 = st.columns([2, 1.5, 2, 2])
+
+    with model_col:
         model_options = get_model_options()
         current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
         selected_model = st.selectbox("Model:", model_options, index=current_idx, key="format_model")
@@ -1652,7 +1672,7 @@ def render_format_step():
             st.session_state.selected_model = selected_model
             save_settings()
 
-    with col2:
+    with workers_col:
         max_workers = st.number_input(
             "Parallel workers:",
             min_value=1,
@@ -1662,62 +1682,65 @@ def render_format_step():
             key="format_workers"
         )
 
-    with col3:
-        if st.button("Format ALL Questions", type="primary"):
+    # Helper function to format a single question
+    def format_single(item):
+        ch_key, rq = item
+        ch_num = rq["chapter"]
+        formatted = format_qa_pair_llm(
+            client,
+            rq["local_id"],
+            rq["question_text"],
+            rq["answer_text"],
+            get_selected_model_id(),
+            ch_num
+        )
+        # Add metadata
+        formatted["full_id"] = rq["full_id"]
+        formatted["local_id"] = rq["local_id"]
+        formatted["image_files"] = rq["image_files"]
+        # Use correct_letter from extraction if LLM didn't find it
+        if not formatted.get("correct_answer") and rq.get("correct_letter"):
+            formatted["correct_answer"] = rq["correct_letter"]
+        return ch_key, formatted
+
+    with btn_col1:
+        format_chapter = st.button(
+            f"Format Chapter {selected_ch_num} ({ch_raw_count})",
+            type="primary",
+            key="format_chapter_btn",
+            disabled=ch_raw_count == 0
+        )
+
+    with btn_col2:
+        format_all = st.button("Format ALL Questions", type="secondary", key="format_all_btn")
+
+    # Single chapter formatting logic
+    if format_chapter:
+        if ch_raw_count == 0:
+            st.warning(f"No raw questions in Chapter {selected_ch_num}")
+        else:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            model_id = get_selected_model_id()
+            # Collect raw questions for this chapter
+            ch_raw = [(selected_ch_key, rq) for rq in ch_raw_questions]
+            total = len(ch_raw)
+            status_text.text(f"Formatting {total} Q&A pairs from Chapter {selected_ch_num}...")
 
-            # Collect all raw questions
-            all_raw = []
-            for ch_key, ch_raw in raw_questions.items():
-                for rq in ch_raw:
-                    all_raw.append((ch_key, rq))
-
-            total = len(all_raw)
-            status_text.text(f"Formatting {total} Q&A pairs with {max_workers} parallel workers...")
-
-            # Format in parallel
-            formatted_by_chapter = {}
+            formatted_list = []
             completed = 0
 
-            def format_single(item):
-                ch_key, rq = item
-                ch_num = rq["chapter"]
-                formatted = format_qa_pair_llm(
-                    client,
-                    rq["local_id"],
-                    rq["question_text"],
-                    rq["answer_text"],
-                    model_id,
-                    ch_num
-                )
-                # Add metadata
-                formatted["full_id"] = rq["full_id"]
-                formatted["local_id"] = rq["local_id"]
-                formatted["image_files"] = rq["image_files"]
-                # Use correct_letter from extraction if LLM didn't find it
-                if not formatted.get("correct_answer") and rq.get("correct_letter"):
-                    formatted["correct_answer"] = rq["correct_letter"]
-                return ch_key, formatted
-
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(format_single, item): item for item in all_raw}
+                futures = {executor.submit(format_single, item): item for item in ch_raw}
 
                 for future in as_completed(futures):
                     try:
                         ch_key, formatted = future.result()
-                        if ch_key not in formatted_by_chapter:
-                            formatted_by_chapter[ch_key] = []
-                        formatted_by_chapter[ch_key].append(formatted)
+                        formatted_list.append(formatted)
                     except Exception as e:
                         ch_key, rq = futures[future]
                         logger.error(f"Error formatting {rq['full_id']}: {e}")
-                        # Add placeholder
-                        if ch_key not in formatted_by_chapter:
-                            formatted_by_chapter[ch_key] = []
-                        formatted_by_chapter[ch_key].append({
+                        formatted_list.append({
                             "full_id": rq["full_id"],
                             "local_id": rq["local_id"],
                             "text": rq["question_text"],
@@ -1730,32 +1753,96 @@ def render_format_step():
 
                     completed += 1
                     progress_bar.progress(completed / total)
-                    status_text.text(f"Formatted {completed}/{total} Q&A pairs...")
+                    status_text.text(f"Chapter {selected_ch_num}: {completed}/{total} formatted...")
 
-                    # Save incrementally every 10 questions
-                    if completed % 10 == 0:
-                        st.session_state.questions = formatted_by_chapter
-                        save_questions()
-
-            # Sort questions within each chapter
-            for ch_key in formatted_by_chapter:
-                formatted_by_chapter[ch_key].sort(key=lambda q: question_sort_key(q["full_id"]))
-
-            st.session_state.questions = formatted_by_chapter
+            # Sort and save
+            formatted_list.sort(key=lambda q: question_sort_key(q["full_id"]))
+            st.session_state.questions[selected_ch_key] = formatted_list
             save_questions()
 
-            # Build image assignments from image_files
-            for ch_key, questions in formatted_by_chapter.items():
-                for q in questions:
-                    for img_file in q.get("image_files", []):
-                        st.session_state.image_assignments[img_file] = q["full_id"]
+            # Build image assignments for this chapter
+            for q in formatted_list:
+                for img_file in q.get("image_files", []):
+                    st.session_state.image_assignments[img_file] = q["full_id"]
             save_image_assignments()
 
             status_text.text("Done!")
-            st.success(f"Formatted {total} Q&A pairs")
+            st.success(f"Formatted {total} Q&A pairs from Chapter {selected_ch_num}")
             play_completion_sound()
-            st.info("**Next:** Go to **Step 5: Associate Context** to link context questions to sub-questions.")
             st.rerun()
+
+    # All chapters formatting logic
+    if format_all:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        # Collect all raw questions
+        all_raw = []
+        for ch_key, ch_raw in raw_questions.items():
+            for rq in ch_raw:
+                all_raw.append((ch_key, rq))
+
+        total = len(all_raw)
+        status_text.text(f"Formatting {total} Q&A pairs with {max_workers} parallel workers...")
+
+        # Format in parallel
+        formatted_by_chapter = {}
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(format_single, item): item for item in all_raw}
+
+            for future in as_completed(futures):
+                try:
+                    ch_key, formatted = future.result()
+                    if ch_key not in formatted_by_chapter:
+                        formatted_by_chapter[ch_key] = []
+                    formatted_by_chapter[ch_key].append(formatted)
+                except Exception as e:
+                    ch_key, rq = futures[future]
+                    logger.error(f"Error formatting {rq['full_id']}: {e}")
+                    # Add placeholder
+                    if ch_key not in formatted_by_chapter:
+                        formatted_by_chapter[ch_key] = []
+                    formatted_by_chapter[ch_key].append({
+                        "full_id": rq["full_id"],
+                        "local_id": rq["local_id"],
+                        "text": rq["question_text"],
+                        "choices": {},
+                        "correct_answer": rq.get("correct_letter", ""),
+                        "explanation": rq["answer_text"],
+                        "image_files": rq["image_files"],
+                        "error": str(e)
+                    })
+
+                completed += 1
+                progress_bar.progress(completed / total)
+                status_text.text(f"Formatted {completed}/{total} Q&A pairs...")
+
+                # Save incrementally every 10 questions
+                if completed % 10 == 0:
+                    st.session_state.questions = formatted_by_chapter
+                    save_questions()
+
+        # Sort questions within each chapter
+        for ch_key in formatted_by_chapter:
+            formatted_by_chapter[ch_key].sort(key=lambda q: question_sort_key(q["full_id"]))
+
+        st.session_state.questions = formatted_by_chapter
+        save_questions()
+
+        # Build image assignments from image_files
+        for ch_key, questions in formatted_by_chapter.items():
+            for q in questions:
+                for img_file in q.get("image_files", []):
+                    st.session_state.image_assignments[img_file] = q["full_id"]
+        save_image_assignments()
+
+        status_text.text("Done!")
+        st.success(f"Formatted {total} Q&A pairs")
+        play_completion_sound()
+        st.info("**Next:** Go to **Step 5: Associate Context** to link context questions to sub-questions.")
+        st.rerun()
 
     # Display formatted questions if available
     if st.session_state.questions:
