@@ -92,6 +92,10 @@ def get_pages_file() -> str:
     return f"{get_output_dir()}/pages.json"
 
 
+def get_generated_questions_file() -> str:
+    return f"{get_output_dir()}/generated_questions.json"
+
+
 def get_available_textbooks() -> list[str]:
     """Get list of textbooks that have output data."""
     textbooks = []
@@ -141,6 +145,8 @@ def init_session_state():
         st.session_state.qc_selected_idx = 0
     if "pdf_path" not in st.session_state:
         st.session_state.pdf_path = None
+    if "generated_questions" not in st.session_state:
+        st.session_state.generated_questions = {"metadata": {}, "generated_cards": {}}
 
     if is_fresh_init:
         st.session_state.initialized = True
@@ -160,6 +166,7 @@ def clear_session_data():
     st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
     st.session_state.qc_selected_idx = 0
     st.session_state.pdf_path = None
+    st.session_state.generated_questions = {"metadata": {}, "generated_cards": {}}
 
 
 # =============================================================================
@@ -232,6 +239,11 @@ def load_saved_data():
     if os.path.exists(assignments_merged_file):
         with open(assignments_merged_file) as f:
             st.session_state.image_assignments_merged = json.load(f)
+
+    generated_file = get_generated_questions_file()
+    if os.path.exists(generated_file):
+        with open(generated_file) as f:
+            st.session_state.generated_questions = json.load(f)
 
     # Assign chapters to images if chapters exist but images don't have chapter info
     if st.session_state.chapters and st.session_state.images:
@@ -314,6 +326,14 @@ def save_image_assignments_merged():
     os.makedirs(get_output_dir(), exist_ok=True)
     with open(get_image_assignments_merged_file(), "w") as f:
         json.dump(st.session_state.image_assignments_merged, f, indent=2)
+
+
+def save_generated_questions():
+    """Save generated cloze questions to file."""
+    os.makedirs(get_output_dir(), exist_ok=True)
+    st.session_state.generated_questions["metadata"]["last_updated"] = datetime.now().isoformat()
+    with open(get_generated_questions_file(), "w") as f:
+        json.dump(st.session_state.generated_questions, f, indent=2)
 
 
 def save_settings():

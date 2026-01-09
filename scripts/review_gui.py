@@ -26,6 +26,7 @@ from ui_components import (
     render_format_step,
     render_context_step,
     render_qc_step,
+    render_generate_step,
     render_export_step,
     render_prompts_step
 )
@@ -71,6 +72,8 @@ def main():
         render_context_step()
     elif step == "qc":
         render_qc_step()
+    elif step == "generate":
+        render_generate_step()
     elif step == "export":
         render_export_step()
     elif step == "prompts":

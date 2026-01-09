@@ -100,11 +100,11 @@ def clear_step_data(step_id: str, cascade: bool = True):
     """Clear data for a specific step and all subsequent steps, allowing re-run from that point.
 
     Args:
-        step_id: One of 'source', 'chapters', 'questions', 'format', 'context', 'qc', 'export'
+        step_id: One of 'source', 'chapters', 'questions', 'format', 'context', 'qc', 'generate', 'export'
         cascade: If True, also clear all subsequent steps (default True)
     """
     # Define step order for cascading
-    step_order = ["source", "chapters", "questions", "format", "context", "qc", "export"]
+    step_order = ["source", "chapters", "questions", "format", "context", "qc", "generate", "export"]
 
     # Find the index of the current step
     try:
@@ -176,6 +176,13 @@ def clear_step_data(step_id: str, cascade: bool = True):
             st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
             st.session_state.qc_selected_idx = 0
             filepath = os.path.join(output_dir, "qc_progress.json")
+            if os.path.exists(filepath):
+                os.remove(filepath)
+
+        elif step == "generate":
+            # Clear generated cloze questions
+            st.session_state.generated_questions = {"metadata": {}, "generated_cards": {}}
+            filepath = os.path.join(output_dir, "generated_questions.json")
             if os.path.exists(filepath):
                 os.remove(filepath)
 
@@ -322,6 +329,10 @@ def get_step_completion_status() -> dict[str, bool]:
     reviewed_count = len(st.session_state.qc_progress.get("reviewed", {}))
     qc_complete = total_questions > 0 and reviewed_count >= total_questions
 
+    # Generate step is complete when we have generated cards
+    generated_cards = st.session_state.generated_questions.get("generated_cards", {})
+    generate_complete = bool(generated_cards) and sum(len(c) for c in generated_cards.values()) > 0
+
     return {
         "source": st.session_state.pages is not None and len(st.session_state.pages) > 0,
         "chapters": st.session_state.chapters is not None and len(st.session_state.chapters) > 0,
@@ -329,6 +340,7 @@ def get_step_completion_status() -> dict[str, bool]:
         "format": bool(st.session_state.questions) and sum(len(qs) for qs in st.session_state.questions.values()) > 0,
         "context": bool(st.session_state.questions_merged) and sum(len(qs) for qs in st.session_state.questions_merged.values()) > 0,
         "qc": qc_complete,
+        "generate": generate_complete,
         "export": False,  # Export is an action, not a state
         "prompts": False,  # Prompts step is always accessible, not completable
     }
@@ -372,8 +384,9 @@ def render_sidebar():
         ("format", "4. Format Questions"),
         ("context", "5. Associate Context"),
         ("qc", "6. QC Questions"),
-        ("export", "7. Export"),
-        ("prompts", "8. Edit Prompts")
+        ("generate", "7. Generate Questions"),
+        ("export", "8. Export"),
+        ("prompts", "9. Edit Prompts")
     ]
 
     for step_id, step_name in steps:
@@ -2951,11 +2964,292 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
     return output_path
 
 
+def render_generate_step():
+    """Render the cloze card generation step."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import datetime
+    from llm_extraction import generate_cloze_cards_llm
+    from state_management import save_generated_questions
+
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.header("Step 7: Generate Questions")
+    with col2:
+        if st.button("Reset To This Step", key="clear_generate", type="secondary",
+                     help="Clear generated cloze cards"):
+            clear_step_data("generate")
+            st.success("Generated cards cleared")
+            st.rerun()
+
+    st.markdown("""
+    Generate cloze deletion flashcards from question explanations.
+    Each explanation is analyzed to extract key learning points that become additional Anki cards.
+    """)
+
+    # Check prerequisites - need either questions_merged or questions
+    questions_source = st.session_state.questions_merged or st.session_state.questions
+    if not questions_source:
+        st.warning("Please format questions first (Step 4)")
+        return
+
+    client = get_anthropic_client()
+    if not client:
+        st.error("ANTHROPIC_API_KEY not set. Please set your API key in environment variables.")
+        return
+
+    # Count questions with explanations (skip context-only)
+    all_questions = []
+    for ch_key in sort_chapter_keys(questions_source.keys()):
+        ch_questions = questions_source[ch_key]
+        ch_num = int(ch_key[2:]) if ch_key.startswith("ch") else 0
+        for q in ch_questions:
+            explanation = q.get("explanation", "")
+            if explanation and len(explanation) >= 50 and not q.get("is_context_only"):
+                all_questions.append((ch_key, ch_num, q))
+
+    total_with_explanations = len(all_questions)
+    generated_cards = st.session_state.generated_questions.get("generated_cards", {})
+    total_generated = sum(len(cards) for cards in generated_cards.values())
+
+    # Stats row
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Questions with Explanations", total_with_explanations)
+    with col2:
+        st.metric("Generated Cards", total_generated)
+    with col3:
+        avg = total_generated / total_with_explanations if total_with_explanations > 0 else 0
+        st.metric("Avg Cards/Question", f"{avg:.1f}")
+
+    st.markdown("---")
+
+    # Generation controls
+    col1, col2, col3 = st.columns([2, 1.5, 2])
+
+    with col1:
+        model_options = get_model_options()
+        current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
+        selected_model = st.selectbox("Model:", model_options, index=current_idx, key="generate_model")
+        if selected_model != st.session_state.selected_model:
+            st.session_state.selected_model = selected_model
+            save_settings()
+
+    with col2:
+        gen_workers = st.number_input(
+            "Parallel workers:",
+            min_value=1, max_value=50, value=20,
+            key="generate_workers",
+            help="Number of questions to process in parallel"
+        )
+
+    with col3:
+        generate_all = st.button("Generate ALL Cards", type="primary", key="gen_all_btn")
+
+    # Generation logic
+    if generate_all:
+        if total_with_explanations == 0:
+            st.warning("No questions with explanations found to process")
+        else:
+            model_id = get_selected_model_id()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            # Initialize generated_questions structure
+            if not st.session_state.generated_questions.get("metadata"):
+                st.session_state.generated_questions["metadata"] = {
+                    "created_at": datetime.now().isoformat(),
+                    "model_used": model_id,
+                    "total_generated": 0,
+                    "source_questions_processed": 0
+                }
+            if "generated_cards" not in st.session_state.generated_questions:
+                st.session_state.generated_questions["generated_cards"] = {}
+
+            completed = 0
+            total_cards_generated = 0
+
+            def process_question(item):
+                ch_key, ch_num, q = item
+                cards = generate_cloze_cards_llm(client, q, ch_num, model_id)
+                return ch_key, q, cards
+
+            with ThreadPoolExecutor(max_workers=gen_workers) as executor:
+                futures = {executor.submit(process_question, item): item for item in all_questions}
+
+                for future in as_completed(futures):
+                    ch_key, q, cards = future.result()
+                    completed += 1
+
+                    if cards:
+                        # Initialize chapter list if needed
+                        if ch_key not in st.session_state.generated_questions["generated_cards"]:
+                            st.session_state.generated_questions["generated_cards"][ch_key] = []
+
+                        # Build full card objects with source context
+                        for i, card in enumerate(cards, 1):
+                            full_card = {
+                                "generated_id": f"{q['full_id']}_gen_{i}",
+                                "source_question_id": q["full_id"],
+                                "source_chapter": ch_key,
+                                "cloze_text": card.get("cloze_text", ""),
+                                "learning_point": card.get("learning_point", ""),
+                                "source_context": {
+                                    "question_text": q.get("text", "")[:500],
+                                    "correct_answer": q.get("correct_answer", ""),
+                                    "explanation_excerpt": card.get("explanation_excerpt", ""),
+                                    "image_files": q.get("image_files", [])
+                                },
+                                "generation_metadata": {
+                                    "created_at": datetime.now().isoformat(),
+                                    "confidence": card.get("confidence", "medium"),
+                                    "category": card.get("category", "")
+                                }
+                            }
+                            st.session_state.generated_questions["generated_cards"][ch_key].append(full_card)
+                            total_cards_generated += 1
+
+                    # Update progress
+                    progress = completed / total_with_explanations
+                    progress_bar.progress(progress)
+                    status_text.text(f"Processing: {completed}/{total_with_explanations} questions | {total_cards_generated} cards generated")
+
+                    # Save periodically (every 10 questions)
+                    if completed % 10 == 0:
+                        st.session_state.generated_questions["metadata"]["total_generated"] = total_cards_generated
+                        st.session_state.generated_questions["metadata"]["source_questions_processed"] = completed
+                        save_generated_questions()
+
+            # Final save
+            st.session_state.generated_questions["metadata"]["total_generated"] = total_cards_generated
+            st.session_state.generated_questions["metadata"]["source_questions_processed"] = completed
+            save_generated_questions()
+
+            progress_bar.progress(1.0)
+            status_text.text(f"Complete: {completed} questions processed, {total_cards_generated} cards generated")
+            st.success(f"Generated {total_cards_generated} cloze cards from {completed} questions!")
+            st.rerun()
+
+    # Preview section
+    generated_cards = st.session_state.generated_questions.get("generated_cards", {})
+    if generated_cards:
+        st.markdown("---")
+        st.subheader("Generated Cards Preview")
+
+        # Filters
+        col1, col2 = st.columns(2)
+        with col1:
+            ch_options = ["All Chapters"] + sort_chapter_keys(generated_cards.keys())
+            ch_filter = st.selectbox("Filter by chapter:", ch_options, key="gen_ch_filter")
+        with col2:
+            # Get unique source question IDs
+            source_ids = set()
+            for ch_cards in generated_cards.values():
+                for card in ch_cards:
+                    source_ids.add(card["source_question_id"])
+            source_options = ["All Questions"] + sorted(source_ids, key=question_sort_key)
+            source_filter = st.selectbox("Filter by source:", source_options, key="gen_source_filter")
+
+        # Collect filtered cards
+        filtered_cards = []
+        for ch_key in sort_chapter_keys(generated_cards.keys()):
+            if ch_filter != "All Chapters" and ch_key != ch_filter:
+                continue
+            for card in generated_cards[ch_key]:
+                if source_filter != "All Questions" and card["source_question_id"] != source_filter:
+                    continue
+                filtered_cards.append((ch_key, card))
+
+        if not filtered_cards:
+            st.caption("No cards match filters")
+        else:
+            st.caption(f"Showing {len(filtered_cards)} cards")
+
+            # Card navigation
+            if "gen_preview_idx" not in st.session_state:
+                st.session_state.gen_preview_idx = 0
+            if st.session_state.gen_preview_idx >= len(filtered_cards):
+                st.session_state.gen_preview_idx = 0
+
+            current_idx = st.session_state.gen_preview_idx
+            ch_key, card = filtered_cards[current_idx]
+
+            # Navigation
+            nav_col1, nav_col2, nav_col3 = st.columns([1, 3, 1])
+            with nav_col1:
+                if st.button("< Previous", disabled=(current_idx == 0), key="gen_prev"):
+                    st.session_state.gen_preview_idx -= 1
+                    st.rerun()
+            with nav_col2:
+                st.markdown(f"<div style='text-align: center;'>Card {current_idx + 1} of {len(filtered_cards)}</div>",
+                           unsafe_allow_html=True)
+            with nav_col3:
+                if st.button("Next >", disabled=(current_idx >= len(filtered_cards) - 1), key="gen_next"):
+                    st.session_state.gen_preview_idx += 1
+                    st.rerun()
+
+            # Side-by-side display
+            left_col, right_col = st.columns(2)
+
+            with left_col:
+                st.markdown("#### Source Material")
+                source_ctx = card.get("source_context", {})
+
+                st.markdown(f"**Question:** `{card['source_question_id']}`")
+                q_text = source_ctx.get("question_text", "N/A")
+                if len(q_text) > 300:
+                    q_text = q_text[:300] + "..."
+                st.markdown(q_text)
+
+                # Show image if available
+                if source_ctx.get("image_files"):
+                    for img_file in source_ctx["image_files"][:1]:
+                        img_path = os.path.join(get_images_dir(), img_file)
+                        if os.path.exists(img_path):
+                            st.image(img_path, width=300)
+
+                st.markdown(f"**Correct Answer:** {source_ctx.get('correct_answer', 'N/A')}")
+
+                st.markdown("**Explanation Excerpt:**")
+                excerpt = source_ctx.get("explanation_excerpt", "")
+                if excerpt:
+                    st.text_area("", excerpt, height=150, disabled=True, key=f"src_exp_{current_idx}")
+                else:
+                    st.caption("No excerpt available")
+
+            with right_col:
+                st.markdown("#### Generated Cloze Card")
+
+                # Display cloze with visual highlighting
+                cloze_text = card.get("cloze_text", "")
+                # Convert {{c1::text}} to **[text]** for visual display
+                import re
+                display_text = re.sub(r'\{\{c\d+::([^}]+)\}\}', r'**[\1]**', cloze_text)
+                st.markdown(f"**Cloze:**")
+                st.markdown(display_text)
+
+                st.markdown(f"**Learning Point:** {card.get('learning_point', 'N/A')}")
+
+                gen_meta = card.get("generation_metadata", {})
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.markdown(f"**Confidence:** {gen_meta.get('confidence', 'N/A')}")
+                with col_b:
+                    st.markdown(f"**Category:** {gen_meta.get('category', 'N/A')}")
+
+                # Show all cards from same source
+                same_source_cards = [c for _, c in filtered_cards if c["source_question_id"] == card["source_question_id"]]
+                if len(same_source_cards) > 1:
+                    with st.expander(f"All {len(same_source_cards)} cards from this source"):
+                        for i, sc in enumerate(same_source_cards, 1):
+                            display = re.sub(r'\{\{c\d+::([^}]+)\}\}', r'[\1]', sc.get("cloze_text", ""))
+                            st.markdown(f"{i}. {display}")
+
+
 def render_export_step():
     """Render export step."""
     col1, col2 = st.columns([4, 1])
     with col1:
-        st.header("Step 7: Export to Anki")
+        st.header("Step 8: Export to Anki")
     with col2:
         if st.button("Clear Exports", key="clear_export", type="secondary", help="Delete exported .apkg files"):
             clear_step_data("export")

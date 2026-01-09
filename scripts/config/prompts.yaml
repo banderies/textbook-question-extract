@@ -321,3 +321,58 @@ format_qa_pair:
       "explanation": "",
       "is_context_only": true
     }}
+
+generate_cloze_cards:
+  description: "Generate cloze deletion flashcards from explanation text"
+  prompt: |
+    You are creating Anki cloze deletion flashcards from a medical textbook explanation.
+
+    SOURCE QUESTION:
+    - Question ID: {question_id}
+    - Question: {question_text}
+    - Correct Answer: {correct_answer}
+
+    EXPLANATION TO PROCESS:
+    {explanation}
+
+    TASK: Extract key learning points and create cloze deletion cards.
+
+    CLOZE SYNTAX RULES:
+    1. Use {{{{c1::text}}}} for deletions (double braces required in output)
+    2. Each card tests ONE key fact or relationship
+    3. Related facts can use c1, c2, c3 on the same card
+    4. Keep surrounding context for meaning
+
+    GOOD EXAMPLES:
+    - "The {{{{c1::foramen spinosum}}}} transmits the {{{{c2::middle meningeal artery}}}}."
+    - "{{{{c1::DNET}}}} commonly presents with {{{{c2::intractable seizures}}}} in the {{{{c3::temporal lobe}}}}."
+    - "Brainstem gliomas account for {{{{c1::10% to 20%}}}} of all intracranial tumors in children."
+    - "{{{{c1::Ganglioglioma}}}} differs from DNET in that {{{{c2::calcification}}}} and {{{{c3::contrast enhancement}}}} are more common."
+
+    BAD EXAMPLES (avoid):
+    - "The answer is {{{{c1::C}}}}." (too trivial)
+    - "{{{{c1::This}}}} is common." (unclear reference)
+    - "The {{{{c1::patient}}}} presented with symptoms." (too generic)
+
+    QUALITY GUIDELINES:
+    - Focus on: anatomical structures, pathways, clinical findings, diagnostic criteria, percentages/statistics, differential diagnosis features
+    - Extract 2-8 high-quality cards per explanation (more for longer explanations)
+    - Skip citations, references, and non-educational filler
+    - Each card should stand alone without needing the original question
+    - For differential diagnoses, create cards that highlight distinguishing features
+    - Include specific numbers, percentages, and measurements when present
+
+    Return ONLY a JSON array (no other text):
+    [
+      {{
+        "cloze_text": "The {{{{c1::foramen spinosum}}}} transmits the {{{{c2::middle meningeal artery}}}}.",
+        "learning_point": "Foramen spinosum contents",
+        "explanation_excerpt": "The specific sentence or phrase this was derived from.",
+        "confidence": "high",
+        "category": "anatomy"
+      }}
+    ]
+
+    Categories to use: anatomy, pathology, imaging, clinical, differential, statistics
+
+    If no suitable content for cloze cards, return: []

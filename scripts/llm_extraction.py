@@ -1342,3 +1342,106 @@ def associate_context_llm(client, questions: dict, image_assignments: dict,
                 q["is_context_only"] = False
 
     return questions, updated_assignments, stats
+
+
+def generate_cloze_cards_llm(
+    client,
+    question: dict,
+    chapter_num: int,
+    model_id: str,
+    max_retries: int = 5
+) -> list[dict]:
+    """
+    Generate cloze deletion cards from a question's explanation.
+
+    Uses the LLM to identify key learning points in the explanation text
+    and create Anki-compatible cloze deletion cards.
+
+    Args:
+        client: Anthropic client
+        question: Question dict with 'explanation', 'text', 'correct_answer', etc.
+        chapter_num: Chapter number for logging
+        model_id: Model to use
+        max_retries: Maximum retry attempts for rate limit errors
+
+    Returns:
+        List of generated card dicts with keys:
+        - cloze_text: Text with {{c1::...}} cloze syntax
+        - learning_point: Brief description of what the card tests
+        - explanation_excerpt: Source text this was derived from
+        - confidence: "high" or "medium"
+        - category: anatomy, pathology, imaging, clinical, differential, statistics
+    """
+    import time
+    import anthropic
+
+    logger = get_extraction_logger()
+    q_id = question.get("full_id", "unknown")
+    log_prefix = f"Cloze {q_id}"
+
+    explanation = question.get("explanation", "")
+    if not explanation or len(explanation) < 50:
+        logger.debug(f"{log_prefix}: Skipping - explanation too short ({len(explanation)} chars)")
+        return []
+
+    prompt = get_prompt(
+        "generate_cloze_cards",
+        question_id=q_id,
+        question_text=question.get("text", "")[:500],
+        correct_answer=question.get("correct_answer", ""),
+        explanation=explanation
+    )
+
+    for attempt in range(max_retries + 1):
+        try:
+            response_text, usage = stream_message(
+                client,
+                model_id,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=4000
+            )
+
+            logger.debug(
+                f"{log_prefix}: in={usage['input_tokens']}, "
+                f"out={usage['output_tokens']}"
+            )
+
+            # Extract JSON from markdown code blocks if present
+            if "```" in response_text:
+                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+                if match:
+                    response_text = match.group(1)
+
+            # Try parsing JSON, with repair attempt on failure
+            try:
+                cards = json.loads(response_text)
+            except json.JSONDecodeError:
+                repaired = repair_json(response_text)
+                try:
+                    cards = json.loads(repaired)
+                    logger.info(f"{log_prefix}: JSON repaired successfully")
+                except json.JSONDecodeError:
+                    logger.error(f"{log_prefix}: JSON parse error even after repair")
+                    return []
+
+            if not isinstance(cards, list):
+                logger.warning(f"{log_prefix}: Expected list, got {type(cards).__name__}")
+                return []
+
+            logger.info(f"{log_prefix}: Generated {len(cards)} cloze cards")
+            return cards
+
+        except anthropic.RateLimitError as e:
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: Rate limited, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: Rate limit exceeded after {max_retries} retries")
+                return []
+
+        except Exception as e:
+            logger.error(f"{log_prefix}: API error - {type(e).__name__}: {e}")
+            return []
+
+    return []
