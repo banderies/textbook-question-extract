@@ -3112,26 +3112,16 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
         generated_cards = generated_questions.get("generated_cards", {})
 
         if generated_cards:
-            # Group generated cards by chapter
-            cards_by_chapter = {}
-            for source_q_id, cards in generated_cards.items():
-                ch_num = source_q_id.split('_')[0].replace('ch', '') if '_' in source_q_id else '?'
-                if ch_num not in cards_by_chapter:
-                    cards_by_chapter[ch_num] = []
-                for card in cards:
-                    card_with_source = card.copy()
-                    card_with_source['source_q_id'] = source_q_id
-                    cards_by_chapter[ch_num].append(card_with_source)
+            # generated_cards is keyed by chapter (e.g., "ch4"), each value is a list of cards
+            # Each card has source_question_id (e.g., "ch4_2a") for the source question
 
             # Create a generated sub-deck for each chapter
             for ch in chapters:
                 ch_num = str(ch['chapter_number'])
+                ch_key = f"ch{ch_num}"
                 ch_title = ch.get('title', f'Chapter {ch_num}')
 
-                if ch_num not in cards_by_chapter:
-                    continue
-
-                ch_cards = cards_by_chapter[ch_num]
+                ch_cards = generated_cards.get(ch_key, [])
                 if not ch_cards:
                     continue
 
@@ -3145,7 +3135,8 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                     if not cloze_text:
                         continue
 
-                    source_q_id = card.get('source_q_id', '')
+                    # Get source question ID from card data
+                    source_q_id = card.get('source_question_id', '')
                     local_id = source_q_id.split('_')[-1] if '_' in source_q_id else source_q_id
 
                     # Extra info: learning point and category
@@ -3527,12 +3518,12 @@ def render_export_step():
     with st.expander("Preview Deck Structure"):
         st.markdown(f"**{book_name}**")
 
-        # Count generated cards per chapter
+        # Count generated cards per chapter (keys are "ch4", "ch5", etc.)
         generated_by_chapter = {}
         if include_generated:
-            for source_q_id, cards in generated_cards.items():
-                ch_num = source_q_id.split('_')[0].replace('ch', '') if '_' in source_q_id else '?'
-                generated_by_chapter[ch_num] = generated_by_chapter.get(ch_num, 0) + len(cards)
+            for ch_key, cards in generated_cards.items():
+                ch_num = ch_key.replace('ch', '')
+                generated_by_chapter[ch_num] = len(cards)
 
         for ch in (st.session_state.chapters or []):
             ch_num = ch['chapter_number']
