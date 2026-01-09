@@ -1682,6 +1682,9 @@ def render_format_step():
             key="format_workers"
         )
 
+    # Capture model_id before threads start (session state not accessible in worker threads)
+    model_id = get_selected_model_id()
+
     # Helper function to format a single question
     def format_single(item):
         ch_key, rq = item
@@ -1691,7 +1694,7 @@ def render_format_step():
             rq["local_id"],
             rq["question_text"],
             rq["answer_text"],
-            get_selected_model_id(),
+            model_id,
             ch_num
         )
         # Add metadata
