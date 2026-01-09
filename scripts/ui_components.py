@@ -3115,6 +3115,12 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             # generated_cards is keyed by chapter (e.g., "ch4"), each value is a list of cards
             # Each card has source_question_id (e.g., "ch4_2a") for the source question
 
+            # Build question lookup to get source explanations
+            question_lookup = {}
+            for ch_key_q, ch_qs in questions.items():
+                for q in ch_qs:
+                    question_lookup[q['full_id']] = q
+
             # Create a generated sub-deck for each chapter
             for ch in chapters:
                 ch_num = str(ch['chapter_number'])
@@ -3139,12 +3145,18 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                     source_q_id = card.get('source_question_id', '')
                     local_id = source_q_id.split('_')[-1] if '_' in source_q_id else source_q_id
 
-                    # Extra info: learning point and category
+                    # Look up source question to get explanation
+                    source_q = question_lookup.get(source_q_id, {})
+                    source_explanation = source_q.get('explanation', '')
+
+                    # Extra info: learning point, category, and source explanation
                     extra_parts = []
                     if card.get('learning_point'):
                         extra_parts.append(f"<b>Learning point:</b> {card['learning_point']}")
                     if card.get('category'):
                         extra_parts.append(f"<b>Category:</b> {card['category']}")
+                    if source_explanation:
+                        extra_parts.append(f"<hr><b>Source:</b><br>{source_explanation}")
                     extra = '<br>'.join(extra_parts)
 
                     # Source reference
