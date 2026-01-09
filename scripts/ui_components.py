@@ -3551,8 +3551,8 @@ def render_generate_step():
                 # Display cloze with visual highlighting
                 cloze_text = card.get("cloze_text", "")
                 import re
-                # Convert {{c1::text::hint}} to **[text]** for visual display (strip hint if present)
-                display_text = re.sub(r'\{\{c\d+::([^:}]+)(?:::[^}]+)?\}\}', r'**[\1]**', cloze_text)
+                # Convert {{c1::text::hint}} to **[text::hint]** for visual display (keep hint)
+                display_text = re.sub(r'\{\{c\d+::([^}]+)\}\}', r'**[\1]**', cloze_text)
                 # Convert <b>...</b> to **...** for Markdown bold rendering
                 display_text = re.sub(r'<b>([^<]+)</b>', r'**\1**', display_text)
                 st.markdown(f"**Cloze:**")
@@ -3571,8 +3571,8 @@ def render_generate_step():
                 if len(same_source_cards) > 1:
                     with st.expander(f"All {len(same_source_cards)} cards from this source"):
                         for i, sc in enumerate(same_source_cards, 1):
-                            # Convert cloze syntax (with optional hint) and <b> tags for display
-                            display = re.sub(r'\{\{c\d+::([^:}]+)(?:::[^}]+)?\}\}', r'**[\1]**', sc.get("cloze_text", ""))
+                            # Convert cloze syntax and <b> tags for display (keep hint)
+                            display = re.sub(r'\{\{c\d+::([^}]+)\}\}', r'**[\1]**', sc.get("cloze_text", ""))
                             display = re.sub(r'<b>([^<]+)</b>', r'**\1**', display)
                             st.markdown(f"{i}. {display}")
 
