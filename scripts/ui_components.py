@@ -3017,8 +3017,8 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
         if not ch_questions:
             continue
 
-        # Create chapter sub-deck
-        ch_deck_name = f"{book_name}::{ch_num}. {ch_title}"
+        # Create chapter sub-deck for extracted questions
+        ch_deck_name = f"{book_name}::{ch_num}. {ch_title}::Extracted"
         ch_deck_id = stable_id(ch_deck_name)
         ch_deck = genanki.Deck(ch_deck_id, ch_deck_name)
 
@@ -3107,31 +3107,46 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
         if ch_deck.notes:
             all_decks.append(ch_deck)
 
-    # Add generated cloze cards if requested
+    # Add generated cloze cards if requested (organized by chapter)
     if include_generated and generated_questions:
         generated_cards = generated_questions.get("generated_cards", {})
 
         if generated_cards:
-            # Create a sub-deck for generated cards
-            generated_deck_name = f"{book_name}::Generated Cloze Cards"
-            generated_deck_id = stable_id(generated_deck_name)
-            generated_deck = genanki.Deck(generated_deck_id, generated_deck_name)
-
-            # Build lookup for question info (to get chapter/source info)
-            question_lookup = {}
-            for ch_key, ch_qs in questions.items():
-                for q in ch_qs:
-                    question_lookup[q['full_id']] = q
-
+            # Group generated cards by chapter
+            cards_by_chapter = {}
             for source_q_id, cards in generated_cards.items():
-                source_q = question_lookup.get(source_q_id, {})
                 ch_num = source_q_id.split('_')[0].replace('ch', '') if '_' in source_q_id else '?'
-                local_id = source_q_id.split('_')[-1] if '_' in source_q_id else source_q_id
-
+                if ch_num not in cards_by_chapter:
+                    cards_by_chapter[ch_num] = []
                 for card in cards:
+                    card_with_source = card.copy()
+                    card_with_source['source_q_id'] = source_q_id
+                    cards_by_chapter[ch_num].append(card_with_source)
+
+            # Create a generated sub-deck for each chapter
+            for ch in chapters:
+                ch_num = str(ch['chapter_number'])
+                ch_title = ch.get('title', f'Chapter {ch_num}')
+
+                if ch_num not in cards_by_chapter:
+                    continue
+
+                ch_cards = cards_by_chapter[ch_num]
+                if not ch_cards:
+                    continue
+
+                # Create chapter::Generated sub-deck
+                gen_deck_name = f"{book_name}::{ch_num}. {ch_title}::Generated"
+                gen_deck_id = stable_id(gen_deck_name)
+                gen_deck = genanki.Deck(gen_deck_id, gen_deck_name)
+
+                for card in ch_cards:
                     cloze_text = card.get('cloze_text', '')
                     if not cloze_text:
                         continue
+
+                    source_q_id = card.get('source_q_id', '')
+                    local_id = source_q_id.split('_')[-1] if '_' in source_q_id else source_q_id
 
                     # Extra info: learning point and category
                     extra_parts = []
@@ -3142,7 +3157,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                     extra = '<br>'.join(extra_parts)
 
                     # Source reference
-                    source_ref = f"Generated from Ch{ch_num} Q{local_id}"
+                    source_ref = f"Generated from Q{local_id}"
 
                     # Create cloze note
                     cloze_note = genanki.Note(
@@ -3150,10 +3165,10 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                         fields=[cloze_text, extra, source_ref],
                         tags=[f"chapter{ch_num}", "generated", card.get('category', 'general')]
                     )
-                    generated_deck.notes.append(cloze_note)
+                    gen_deck.notes.append(cloze_note)
 
-            if generated_deck.notes:
-                all_decks.append(generated_deck)
+                if gen_deck.notes:
+                    all_decks.append(gen_deck)
 
     # Create package with all chapter decks
     output_dir = get_output_dir()
@@ -3511,16 +3526,28 @@ def render_export_step():
     # Preview deck structure
     with st.expander("Preview Deck Structure"):
         st.markdown(f"**{book_name}**")
+
+        # Count generated cards per chapter
+        generated_by_chapter = {}
+        if include_generated:
+            for source_q_id, cards in generated_cards.items():
+                ch_num = source_q_id.split('_')[0].replace('ch', '') if '_' in source_q_id else '?'
+                generated_by_chapter[ch_num] = generated_by_chapter.get(ch_num, 0) + len(cards)
+
         for ch in (st.session_state.chapters or []):
             ch_num = ch['chapter_number']
             ch_title = ch.get('title', f'Chapter {ch_num}')
             ch_key = f"ch{ch_num}"
-            ch_count = len([q for q in st.session_state.questions.get(ch_key, [])
-                           if not q.get('is_context_only')])
-            if ch_count > 0:
-                st.markdown(f"  - {ch_num}. {ch_title} ({ch_count} cards)")
-        if include_generated and total_generated > 0:
-            st.markdown(f"  - **Generated Cloze Cards** ({total_generated} cards)")
+            extracted_count = len([q for q in st.session_state.questions.get(ch_key, [])
+                                   if not q.get('is_context_only')])
+            gen_count = generated_by_chapter.get(str(ch_num), 0)
+
+            if extracted_count > 0 or (include_generated and gen_count > 0):
+                st.markdown(f"  - **{ch_num}. {ch_title}**")
+                if extracted_count > 0:
+                    st.markdown(f"    - Extracted ({extracted_count} cards)")
+                if include_generated and gen_count > 0:
+                    st.markdown(f"    - Generated ({gen_count} cards)")
 
     # Export button
     if st.button("Export to Anki Deck", type="primary"):
