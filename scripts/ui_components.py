@@ -2068,7 +2068,7 @@ def render_context_step():
                     if q_images:
                         for img in q_images:
                             if os.path.exists(img["filepath"]):
-                                st.image(img["filepath"], caption=f"Page {img['page']}", use_container_width=True)
+                                st.image(img["filepath"], caption=f"Page {img['page']}", use_column_width=True)
                     else:
                         st.caption("No images assigned")
 
@@ -2143,7 +2143,7 @@ def render_context_step():
                         if q_images:
                             for img in q_images:
                                 if os.path.exists(img["filepath"]):
-                                    st.image(img["filepath"], caption=f"Page {img['page']}", use_container_width=True)
+                                    st.image(img["filepath"], caption=f"Page {img['page']}", use_column_width=True)
 
         st.subheader("Merged Questions Preview")
 
@@ -2742,7 +2742,7 @@ def render_qc_step():
                         for img in assigned_images:
                             filepath = img["filepath"]
                             if os.path.exists(filepath):
-                                st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_container_width=True)
+                                st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_column_width=True)
 
                                 st.button("Remove Image", key=f"img_remove_{img['filename']}",
                                          on_click=remove_image, args=(img["filename"],))
@@ -2833,7 +2833,7 @@ def render_qc_step():
                                 for page_num in question_pages:
                                     png_bytes = render_pdf_page(pdf_path, page_num, zoom=1.2)
                                     if png_bytes:
-                                        st.image(png_bytes, caption=f"Page {page_num}", use_container_width=True)
+                                        st.image(png_bytes, caption=f"Page {page_num}", use_column_width=True)
                                     else:
                                         st.error(f"Failed to render page {page_num}")
                             else:
@@ -2849,7 +2849,7 @@ def render_qc_step():
                                 for page_num in answer_pages:
                                     png_bytes = render_pdf_page(pdf_path, page_num, zoom=1.2)
                                     if png_bytes:
-                                        st.image(png_bytes, caption=f"Page {page_num}", use_container_width=True)
+                                        st.image(png_bytes, caption=f"Page {page_num}", use_column_width=True)
                                     else:
                                         st.error(f"Failed to render page {page_num}")
                             else:
