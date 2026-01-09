@@ -3748,10 +3748,6 @@ def render_export_step():
 
     st.markdown("---")
 
-    # Initialize export selections in session state if not present
-    if "export_selections" not in st.session_state:
-        st.session_state.export_selections = {}
-
     # Build deck structure data
     deck_structure = []
     for ch in (st.session_state.chapters or []):
@@ -3785,13 +3781,18 @@ def render_export_step():
                 for ch_data in deck_structure:
                     ch_key = ch_data["ch_key"]
                     if ch_data["extracted_count"] > 0:
-                        st.session_state.export_selections[f"{ch_key}_extracted"] = True
+                        st.session_state[f"export_{ch_key}_extracted"] = True
                     if ch_data["gen_count"] > 0:
-                        st.session_state.export_selections[f"{ch_key}_generated"] = True
+                        st.session_state[f"export_{ch_key}_generated"] = True
                 st.rerun()
         with col2:
             if st.button("Deselect All", key="export_deselect_all"):
-                st.session_state.export_selections = {}
+                for ch_data in deck_structure:
+                    ch_key = ch_data["ch_key"]
+                    if ch_data["extracted_count"] > 0:
+                        st.session_state[f"export_{ch_key}_extracted"] = False
+                    if ch_data["gen_count"] > 0:
+                        st.session_state[f"export_{ch_key}_generated"] = False
                 st.rerun()
 
         st.markdown(f"**{book_name}**")
@@ -3804,30 +3805,30 @@ def render_export_step():
             gen_count = ch_data["gen_count"]
 
             # Initialize defaults if not set (default to True)
-            if f"{ch_key}_extracted" not in st.session_state.export_selections and extracted_count > 0:
-                st.session_state.export_selections[f"{ch_key}_extracted"] = True
-            if f"{ch_key}_generated" not in st.session_state.export_selections and gen_count > 0:
-                st.session_state.export_selections[f"{ch_key}_generated"] = True
+            extracted_key = f"export_{ch_key}_extracted"
+            generated_key = f"export_{ch_key}_generated"
+            if extracted_key not in st.session_state and extracted_count > 0:
+                st.session_state[extracted_key] = True
+            if generated_key not in st.session_state and gen_count > 0:
+                st.session_state[generated_key] = True
 
             st.markdown(f"**Chapter {ch_num}: {ch_title}**")
 
             col1, col2 = st.columns(2)
             with col1:
                 if extracted_count > 0:
-                    st.session_state.export_selections[f"{ch_key}_extracted"] = st.checkbox(
+                    st.checkbox(
                         f"Extracted ({extracted_count} cards)",
-                        value=st.session_state.export_selections.get(f"{ch_key}_extracted", True),
-                        key=f"export_{ch_key}_extracted"
+                        key=extracted_key
                     )
                 else:
                     st.caption("No extracted cards")
 
             with col2:
                 if gen_count > 0:
-                    st.session_state.export_selections[f"{ch_key}_generated"] = st.checkbox(
+                    st.checkbox(
                         f"Generated ({gen_count} cards)",
-                        value=st.session_state.export_selections.get(f"{ch_key}_generated", True),
-                        key=f"export_{ch_key}_generated",
+                        key=generated_key,
                         disabled=not include_generated
                     )
                 else:
@@ -3836,11 +3837,11 @@ def render_export_step():
         # Summary of what will be exported
         total_extracted_selected = sum(
             ch_data["extracted_count"] for ch_data in deck_structure
-            if st.session_state.export_selections.get(f"{ch_data['ch_key']}_extracted", False)
+            if st.session_state.get(f"export_{ch_data['ch_key']}_extracted", False)
         )
         total_generated_selected = sum(
             ch_data["gen_count"] for ch_data in deck_structure
-            if st.session_state.export_selections.get(f"{ch_data['ch_key']}_generated", False) and include_generated
+            if st.session_state.get(f"export_{ch_data['ch_key']}_generated", False) and include_generated
         )
 
         st.markdown("---")
@@ -3858,6 +3859,13 @@ def render_export_step():
                 questions_to_export = st.session_state.questions_merged if st.session_state.questions_merged else st.session_state.questions
                 assignments_to_export = st.session_state.image_assignments_merged if st.session_state.image_assignments_merged else st.session_state.image_assignments
 
+                # Build export_selections from checkbox keys in session state
+                export_selections = {}
+                for ch in (st.session_state.chapters or []):
+                    ch_key = f"ch{ch['chapter_number']}"
+                    export_selections[f"{ch_key}_extracted"] = st.session_state.get(f"export_{ch_key}_extracted", True)
+                    export_selections[f"{ch_key}_generated"] = st.session_state.get(f"export_{ch_key}_generated", True)
+
                 output_path = generate_anki_deck(
                     book_name=book_name.strip(),
                     questions=questions_to_export,
@@ -3869,7 +3877,7 @@ def render_export_step():
                     qc_progress=st.session_state.qc_progress,
                     generated_questions=st.session_state.generated_questions,
                     include_generated=include_generated,
-                    export_selections=st.session_state.export_selections
+                    export_selections=export_selections
                 )
 
                 st.success(f"Deck exported successfully!")
