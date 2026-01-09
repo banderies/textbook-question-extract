@@ -2771,8 +2771,22 @@ def render_qc_step():
 # =============================================================================
 
 def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_assignments: dict,
-                       images: list, include_images: bool, only_approved: bool, qc_progress: dict) -> str:
-    """Generate Anki deck and return path to .apkg file."""
+                       images: list, include_images: bool, only_approved: bool, qc_progress: dict,
+                       generated_questions: dict = None, include_generated: bool = False) -> str:
+    """Generate Anki deck and return path to .apkg file.
+
+    Args:
+        book_name: Name for the deck
+        questions: Dict of chapter questions
+        chapters: List of chapter info
+        image_assignments: Dict mapping image files to question IDs
+        images: List of image metadata
+        include_images: Whether to include images in cards
+        only_approved: Only export QC-approved questions
+        qc_progress: QC progress dict
+        generated_questions: Optional dict of generated cloze cards
+        include_generated: Whether to include generated cloze cards
+    """
     import genanki
     import hashlib
 
@@ -2781,6 +2795,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
         return int(hashlib.md5(name.encode()).hexdigest()[:8], 16)
 
     model_id = stable_id(f"{book_name}_model")
+    cloze_model_id = stable_id(f"{book_name}_cloze_model")
 
     # Create card model (template)
     model = genanki.Model(
@@ -2907,6 +2922,80 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
         '''
     )
 
+    # Create cloze model for generated cards
+    cloze_model = genanki.Model(
+        cloze_model_id,
+        f'{book_name} Cloze Model',
+        model_type=genanki.Model.CLOZE,
+        fields=[
+            {'name': 'Text'},
+            {'name': 'Extra'},
+            {'name': 'Source'},
+        ],
+        templates=[
+            {
+                'name': 'Cloze Card',
+                'qfmt': '''
+                    <div class="cloze-card">
+                        <div class="cloze-text">{{cloze:Text}}</div>
+                    </div>
+                ''',
+                'afmt': '''
+                    <div class="cloze-card">
+                        <div class="cloze-text">{{cloze:Text}}</div>
+                        {{#Extra}}
+                        <hr class="cloze-divider">
+                        <div class="cloze-extra">{{Extra}}</div>
+                        {{/Extra}}
+                        {{#Source}}<div class="cloze-source">{{Source}}</div>{{/Source}}
+                    </div>
+                ''',
+            },
+        ],
+        css='''
+            .card {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                font-size: 18px;
+                line-height: 1.6;
+                color: #2c3e50;
+                background: #fafafa;
+            }
+            .cloze-card {
+                max-width: 650px;
+                margin: 0 auto;
+                padding: 25px;
+            }
+            .cloze-text {
+                font-size: 18px;
+                line-height: 1.7;
+                text-align: left;
+            }
+            .cloze {
+                font-weight: 700;
+                color: #3498db;
+            }
+            .cloze-divider {
+                border: none;
+                border-top: 2px solid #e1e5e9;
+                margin: 20px 0;
+            }
+            .cloze-extra {
+                font-size: 15px;
+                color: #5d6d7e;
+                text-align: left;
+                padding: 12px;
+                background: #f8f9fa;
+                border-radius: 6px;
+            }
+            .cloze-source {
+                margin-top: 15px;
+                font-size: 12px;
+                color: #95a5a6;
+                text-align: left;
+            }
+        '''
+    )
+
     # Build image lookup
     image_lookup = {img['filename']: img for img in images}
 
@@ -3017,6 +3106,54 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
         # Add chapter deck to list if it has notes
         if ch_deck.notes:
             all_decks.append(ch_deck)
+
+    # Add generated cloze cards if requested
+    if include_generated and generated_questions:
+        generated_cards = generated_questions.get("generated_cards", {})
+
+        if generated_cards:
+            # Create a sub-deck for generated cards
+            generated_deck_name = f"{book_name}::Generated Cloze Cards"
+            generated_deck_id = stable_id(generated_deck_name)
+            generated_deck = genanki.Deck(generated_deck_id, generated_deck_name)
+
+            # Build lookup for question info (to get chapter/source info)
+            question_lookup = {}
+            for ch_key, ch_qs in questions.items():
+                for q in ch_qs:
+                    question_lookup[q['full_id']] = q
+
+            for source_q_id, cards in generated_cards.items():
+                source_q = question_lookup.get(source_q_id, {})
+                ch_num = source_q_id.split('_')[0].replace('ch', '') if '_' in source_q_id else '?'
+                local_id = source_q_id.split('_')[-1] if '_' in source_q_id else source_q_id
+
+                for card in cards:
+                    cloze_text = card.get('cloze_text', '')
+                    if not cloze_text:
+                        continue
+
+                    # Extra info: learning point and category
+                    extra_parts = []
+                    if card.get('learning_point'):
+                        extra_parts.append(f"<b>Learning point:</b> {card['learning_point']}")
+                    if card.get('category'):
+                        extra_parts.append(f"<b>Category:</b> {card['category']}")
+                    extra = '<br>'.join(extra_parts)
+
+                    # Source reference
+                    source_ref = f"Generated from Ch{ch_num} Q{local_id}"
+
+                    # Create cloze note
+                    cloze_note = genanki.Note(
+                        model=cloze_model,
+                        fields=[cloze_text, extra, source_ref],
+                        tags=[f"chapter{ch_num}", "generated", card.get('category', 'general')]
+                    )
+                    generated_deck.notes.append(cloze_note)
+
+            if generated_deck.notes:
+                all_decks.append(generated_deck)
 
     # Create package with all chapter decks
     output_dir = get_output_dir()
@@ -3329,13 +3466,19 @@ def render_export_step():
     reviewed = st.session_state.qc_progress.get("reviewed", {})
     approved = sum(1 for r in reviewed.values() if r.get("status") == "approved")
 
-    col1, col2, col3 = st.columns(3)
+    # Count generated cards
+    generated_cards = st.session_state.generated_questions.get("generated_cards", {})
+    total_generated = sum(len(cards) for cards in generated_cards.values())
+
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Total Questions", total)
     with col2:
         st.metric("Exportable", exportable, help="Excludes context-only entries")
     with col3:
         st.metric("Approved (QC'd)", approved)
+    with col4:
+        st.metric("Generated Cloze", total_generated, help="Cloze cards from Step 7")
 
     st.markdown("---")
 
@@ -3348,7 +3491,7 @@ def render_export_step():
                               help="This will be the parent deck name in Anki")
 
     # Export options
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         only_approved = st.checkbox("Only export approved questions",
                                    value=False,
@@ -3357,6 +3500,11 @@ def render_export_step():
         include_images = st.checkbox("Include images",
                                     value=True,
                                     help="Embed assigned images in cards")
+    with col3:
+        include_generated = st.checkbox("Include generated cloze cards",
+                                        value=total_generated > 0,
+                                        disabled=total_generated == 0,
+                                        help="Add cloze cards from Step 7 as a sub-deck")
 
     st.markdown("---")
 
@@ -3371,6 +3519,8 @@ def render_export_step():
                            if not q.get('is_context_only')])
             if ch_count > 0:
                 st.markdown(f"  - {ch_num}. {ch_title} ({ch_count} cards)")
+        if include_generated and total_generated > 0:
+            st.markdown(f"  - **Generated Cloze Cards** ({total_generated} cards)")
 
     # Export button
     if st.button("Export to Anki Deck", type="primary"):
@@ -3392,7 +3542,9 @@ def render_export_step():
                     images=st.session_state.images,
                     include_images=include_images,
                     only_approved=only_approved,
-                    qc_progress=st.session_state.qc_progress
+                    qc_progress=st.session_state.qc_progress,
+                    generated_questions=st.session_state.generated_questions,
+                    include_generated=include_generated
                 )
 
                 st.success(f"Deck exported successfully!")
