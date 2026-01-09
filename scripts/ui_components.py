@@ -2862,7 +2862,8 @@ def render_qc_step():
 
 def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_assignments: dict,
                        images: list, include_images: bool, only_approved: bool, qc_progress: dict,
-                       generated_questions: dict = None, include_generated: bool = False) -> str:
+                       generated_questions: dict = None, include_generated: bool = False,
+                       export_selections: dict = None) -> str:
     """Generate Anki deck and return path to .apkg file.
 
     Args:
@@ -2876,7 +2877,11 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
         qc_progress: QC progress dict
         generated_questions: Optional dict of generated cloze cards
         include_generated: Whether to include generated cloze cards
+        export_selections: Dict of chapter/type selections (e.g., {"ch1_extracted": True, "ch1_generated": False})
     """
+    # Default to all selected if no selections provided
+    if export_selections is None:
+        export_selections = {}
     import genanki
     import hashlib
 
@@ -3107,6 +3112,11 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
         if not ch_questions:
             continue
 
+        # Skip if this chapter's extracted cards are not selected
+        # Default to True if no selection exists (backwards compatibility)
+        if not export_selections.get(f"{ch_key}_extracted", True):
+            continue
+
         # Create chapter sub-deck for extracted questions
         ch_deck_name = f"{book_name}::{ch_num}. {ch_title}::Extracted"
         ch_deck_id = stable_id(ch_deck_name)
@@ -3219,6 +3229,11 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
 
                 ch_cards = generated_cards.get(ch_key, [])
                 if not ch_cards:
+                    continue
+
+                # Skip if this chapter's generated cards are not selected
+                # Default to True if no selection exists (backwards compatibility)
+                if not export_selections.get(f"{ch_key}_generated", True):
                     continue
 
                 # Create chapter::Generated sub-deck
@@ -3733,31 +3748,103 @@ def render_export_step():
 
     st.markdown("---")
 
-    # Preview deck structure
-    with st.expander("Preview Deck Structure"):
+    # Initialize export selections in session state if not present
+    if "export_selections" not in st.session_state:
+        st.session_state.export_selections = {}
+
+    # Build deck structure data
+    deck_structure = []
+    for ch in (st.session_state.chapters or []):
+        ch_num = ch['chapter_number']
+        ch_title = ch.get('title', f'Chapter {ch_num}')
+        ch_key = f"ch{ch_num}"
+        extracted_count = len([q for q in st.session_state.questions.get(ch_key, [])
+                               if not q.get('is_context_only')])
+        gen_count = len(generated_cards.get(ch_key, []))
+
+        if extracted_count > 0 or gen_count > 0:
+            deck_structure.append({
+                "ch_num": ch_num,
+                "ch_key": ch_key,
+                "ch_title": ch_title,
+                "extracted_count": extracted_count,
+                "gen_count": gen_count
+            })
+
+    # Preview deck structure with checkboxes
+    st.subheader("Select Content to Export")
+    st.caption("Choose which chapters and card types to include in the export")
+
+    if not deck_structure:
+        st.warning("No content available to export")
+    else:
+        # Select/Deselect all buttons
+        col1, col2, col3 = st.columns([1, 1, 4])
+        with col1:
+            if st.button("Select All", key="export_select_all"):
+                for ch_data in deck_structure:
+                    ch_key = ch_data["ch_key"]
+                    if ch_data["extracted_count"] > 0:
+                        st.session_state.export_selections[f"{ch_key}_extracted"] = True
+                    if ch_data["gen_count"] > 0:
+                        st.session_state.export_selections[f"{ch_key}_generated"] = True
+                st.rerun()
+        with col2:
+            if st.button("Deselect All", key="export_deselect_all"):
+                st.session_state.export_selections = {}
+                st.rerun()
+
         st.markdown(f"**{book_name}**")
 
-        # Count generated cards per chapter (keys are "ch4", "ch5", etc.)
-        generated_by_chapter = {}
-        if include_generated:
-            for ch_key, cards in generated_cards.items():
-                ch_num = ch_key.replace('ch', '')
-                generated_by_chapter[ch_num] = len(cards)
+        for ch_data in deck_structure:
+            ch_num = ch_data["ch_num"]
+            ch_key = ch_data["ch_key"]
+            ch_title = ch_data["ch_title"]
+            extracted_count = ch_data["extracted_count"]
+            gen_count = ch_data["gen_count"]
 
-        for ch in (st.session_state.chapters or []):
-            ch_num = ch['chapter_number']
-            ch_title = ch.get('title', f'Chapter {ch_num}')
-            ch_key = f"ch{ch_num}"
-            extracted_count = len([q for q in st.session_state.questions.get(ch_key, [])
-                                   if not q.get('is_context_only')])
-            gen_count = generated_by_chapter.get(str(ch_num), 0)
+            # Initialize defaults if not set (default to True)
+            if f"{ch_key}_extracted" not in st.session_state.export_selections and extracted_count > 0:
+                st.session_state.export_selections[f"{ch_key}_extracted"] = True
+            if f"{ch_key}_generated" not in st.session_state.export_selections and gen_count > 0:
+                st.session_state.export_selections[f"{ch_key}_generated"] = True
 
-            if extracted_count > 0 or (include_generated and gen_count > 0):
-                st.markdown(f"  - **{ch_num}. {ch_title}**")
+            st.markdown(f"**Chapter {ch_num}: {ch_title}**")
+
+            col1, col2 = st.columns(2)
+            with col1:
                 if extracted_count > 0:
-                    st.markdown(f"    - Extracted ({extracted_count} cards)")
-                if include_generated and gen_count > 0:
-                    st.markdown(f"    - Generated ({gen_count} cards)")
+                    st.session_state.export_selections[f"{ch_key}_extracted"] = st.checkbox(
+                        f"Extracted ({extracted_count} cards)",
+                        value=st.session_state.export_selections.get(f"{ch_key}_extracted", True),
+                        key=f"export_{ch_key}_extracted"
+                    )
+                else:
+                    st.caption("No extracted cards")
+
+            with col2:
+                if gen_count > 0:
+                    st.session_state.export_selections[f"{ch_key}_generated"] = st.checkbox(
+                        f"Generated ({gen_count} cards)",
+                        value=st.session_state.export_selections.get(f"{ch_key}_generated", True),
+                        key=f"export_{ch_key}_generated",
+                        disabled=not include_generated
+                    )
+                else:
+                    st.caption("No generated cards")
+
+        # Summary of what will be exported
+        total_extracted_selected = sum(
+            ch_data["extracted_count"] for ch_data in deck_structure
+            if st.session_state.export_selections.get(f"{ch_data['ch_key']}_extracted", False)
+        )
+        total_generated_selected = sum(
+            ch_data["gen_count"] for ch_data in deck_structure
+            if st.session_state.export_selections.get(f"{ch_data['ch_key']}_generated", False) and include_generated
+        )
+
+        st.markdown("---")
+        st.markdown(f"**Will export:** {total_extracted_selected} extracted + {total_generated_selected} generated = **{total_extracted_selected + total_generated_selected} total cards**")
 
     # Export button
     if st.button("Export to Anki Deck", type="primary"):
@@ -3781,7 +3868,8 @@ def render_export_step():
                     only_approved=only_approved,
                     qc_progress=st.session_state.qc_progress,
                     generated_questions=st.session_state.generated_questions,
-                    include_generated=include_generated
+                    include_generated=include_generated,
+                    export_selections=st.session_state.export_selections
                 )
 
                 st.success(f"Deck exported successfully!")
