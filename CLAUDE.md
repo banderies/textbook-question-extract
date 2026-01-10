@@ -23,14 +23,16 @@ STEP 2: EXTRACT CHAPTERS
 ├── LLM identifies chapter boundaries from page index
 └── Output: chapters.json + chapter_text.json
     ↓
-STEP 3: EXTRACT QUESTIONS
-├── Claude API: Extract Q&A pairs per chapter (parallel processing)
-├── Image matching: Use flanking text to assign images to questions
-└── Output: questions_by_chapter.json + image_assignments.json
+STEP 3: EXTRACT QUESTIONS (Block-Based)
+├── First pass: LLM identifies question BLOCKS (grouped by main question number)
+├── Output: raw_blocks.json (block boundaries with line ranges)
+└── Each block contains: context + sub-questions + shared discussion
     ↓
-STEP 4: FORMAT QUESTIONS (optional)
-├── Two-pass extraction: line ranges first, then detailed formatting
-└── Output: raw_questions.json (line ranges + extracted text)
+STEP 4: FORMAT QUESTIONS
+├── Second pass: LLM formats each block into structured JSON
+├── Block-aware image assignment: shared images → first sub-question
+├── Sets context_from on subsequent sub-questions for inheritance
+└── Output: questions_by_chapter.json + image_assignments.json + raw_questions.json
     ↓
 STEP 5: ASSOCIATE CONTEXT
 ├── LLM identifies context-only questions (clinical scenarios without choices)
@@ -97,8 +99,9 @@ All state is persisted to JSON files in `output/<textbook_name>/`:
 | `chapters.json` | Detected chapters with page ranges |
 | `chapter_text.json` | Extracted text per chapter |
 | `images.json` | Image metadata with flanking text context |
-| `questions_by_chapter.json` | Extracted Q&A pairs (pre-merge) |
-| `image_assignments.json` | Image filename → question ID mapping (pre-merge) |
+| `raw_blocks.json` | Question blocks with line ranges (Step 3 output) |
+| `questions_by_chapter.json` | Formatted Q&A pairs with block_id and context_from |
+| `image_assignments.json` | Image filename → question ID mapping (block-aware) |
 | `questions_merged.json` | Questions with context merged into sub-questions |
 | `image_assignments_merged.json` | Image assignments after context association |
 | `qc_progress.json` | QC review status per question |
@@ -112,12 +115,17 @@ All state is persisted to JSON files in `output/<textbook_name>/`:
 ### Editable Prompts (config/prompts.yaml)
 All LLM prompts are stored in YAML for easy editing without code changes:
 - `identify_chapters` - Find chapter boundaries
-- `extract_qa_pairs` - Extract questions and answers (single-pass)
-- `extract_line_ranges` - First pass: identify line ranges for each Q&A pair
-- `format_qa_pair` - Second pass: format individual Q&A pairs
-- `match_images_to_questions` - Assign images using flanking text
+- `identify_question_blocks` - First pass: identify question blocks with line ranges
+- `format_raw_block` - Second pass: format blocks into structured Q&A pairs
 - `associate_context` - Link context questions to sub-questions
-- `generate_cloze_cards` - Generate cloze deletion flashcards from explanations
+- `generate_cloze_cards_from_block` - Generate cloze cards from block explanations
+
+Legacy prompts (still available):
+- `extract_qa_pairs` - Single-pass extraction (deprecated)
+- `extract_line_ranges` - Legacy line range extraction
+- `format_qa_pair` - Legacy individual Q&A formatting
+- `match_images_to_questions` - Assign images using flanking text
+- `generate_cloze_cards` - Generate cloze deletion flashcards
 
 ### Dynamic Model Selection
 - Models fetched from Anthropic API via `client.models.list()`
@@ -131,11 +139,34 @@ Images are matched to questions using surrounding text context:
 3. LLM prompt: "Find the LAST question number in text BEFORE image"
 4. Multiple images can belong to the same question
 
-### Context Inheritance
-For multi-part questions (Q1 → Q1a, Q1b, Q1c):
-- Context question (Q1) has `is_context_only: true`
-- Sub-questions have `context_from: "ch1_1"` and `context_merged: true`
-- Images stay assigned to context question; sub-questions inherit via `context_from`
+### Block-Based Context Inheritance
+Questions are grouped into BLOCKS by their main question number. Within each block:
+
+**Image Assignment** (handled by `build_block_aware_image_assignments()`):
+- Shared context images → assigned to FIRST sub-question only (e.g., Q1a)
+- Question-specific images → assigned to that sub-question directly
+- Subsequent sub-questions (Q1b, Q1c) have `context_from: "ch1_1a"` pointing to first
+
+**Image Retrieval** (handled by `get_images_for_question()`):
+- Returns both directly assigned images AND inherited images via `context_from`
+- Q1b gets its own images PLUS images from Q1a (the context source)
+
+**Example**:
+```
+Block 1: context + Q1a + Q1b (shared image)
+  → image assigned to ch1_1a
+  → ch1_1b has context_from: "ch1_1a", inherits image
+
+Block 2: context + Q2a + Q2b (shared image + Q2b-specific image)
+  → shared image assigned to ch1_2a
+  → Q2b-specific image assigned to ch1_2b
+  → ch1_2b has context_from: "ch1_2a", gets BOTH images
+```
+
+**Legacy Context-Only Questions**:
+For questions with `is_context_only: true` (clinical scenarios without choices):
+- Sub-questions have `context_from` pointing to context question
+- Images stay assigned to context question; sub-questions inherit
 
 ### Chapter-Aware Processing
 Question numbering restarts each chapter, so IDs are prefixed: `2a` becomes `ch1_2a` or `ch8_2a`.
@@ -163,9 +194,17 @@ A. ...
 Question 5b text? 5b
 A. ...
 ```
-- Context question (5) marked as `is_context_only`
-- Sub-questions (5a, 5b) have `context_from` pointing to parent
-- Images inherited through `context_from` lookup
+
+**Block-based processing** (current architecture):
+- All questions grouped in one BLOCK with `block_id: "ch1_5"`
+- Shared context image assigned to FIRST sub-question (5a)
+- Sub-question 5b has `context_from: "ch1_5a"` to inherit image
+- Both 5a and 5b include the context text in their `text` field
+
+**Legacy context-only processing**:
+- Context question (5) marked as `is_context_only: true`
+- Sub-questions (5a, 5b) have `context_from: "ch1_5"`
+- Images assigned to context question; sub-questions inherit
 
 ## API Usage
 
@@ -204,5 +243,7 @@ LLM extraction operations are logged to `output/<textbook>/extraction.log`:
 
 ### Common Issues
 - **Images not matching**: Check flanking text in `images.json` - the text before each image should end with a question number
-- **Missing questions**: Review `raw_questions.json` line ranges to verify extraction boundaries
-- **Context not merging**: Questions need matching `image_group` fields and context must have empty `choices`
+- **Missing questions**: Review `raw_blocks.json` to verify block boundaries are correct
+- **Images not inherited**: Verify `context_from` is set on sub-questions (check `questions_by_chapter.json`)
+- **Wrong image assignment**: Check `block_id` field - questions in same block share context images
+- **Context not merging**: Questions need matching `block_id` fields; first sub-question gets shared images

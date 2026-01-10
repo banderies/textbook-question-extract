@@ -34,15 +34,15 @@ The pipeline has 8 steps. Traditional processing is used for PDF parsing, data t
 
 ---
 
-## STEP 3: EXTRACT QUESTIONS (Raw)
+## STEP 3: EXTRACT QUESTIONS (Block-Based)
 
 | Processing | Type | Location | Description |
 |------------|------|----------|-------------|
 | `build_chapter_text_with_lines()` | Traditional | `pdf_extraction.py:327` | Builds chapter text preserving global line numbers |
-| `extract_line_ranges_llm()` | **LLM** | `llm_extraction.py:207` | First pass - identifies line ranges for each Q&A |
+| `identify_question_blocks_llm()` | **LLM** | `llm_extraction.py` | First pass - identifies question BLOCKS with line ranges |
 | `extract_lines_by_range()` | Traditional | `pdf_extraction.py:406` | Extracts text between line numbers |
 | Leading zero fix | Traditional | `llm_extraction.py:271` | Regex to fix `0941` → `941` in JSON |
-| Image file assignment | Traditional | `llm_extraction.py:494` | Maps images from line range data |
+| Block structure creation | Traditional | `ui_components.py` | Creates block structure with `block_id`, images, sub-questions |
 
 ---
 
@@ -50,10 +50,11 @@ The pipeline has 8 steps. Traditional processing is used for PDF parsing, data t
 
 | Processing | Type | Location | Description |
 |------------|------|----------|-------------|
-| `format_qa_pair_llm()` | **LLM** | `llm_extraction.py:321` | Formats individual Q&A into structured JSON |
+| `format_raw_block_llm()` | **LLM** | `llm_extraction.py` | Formats entire block into structured sub-questions |
 | `repair_json()` | Traditional | `llm_extraction.py:287` | Fixes unescaped quotes, control chars, trailing commas |
 | Rate limit handling | Traditional | `llm_extraction.py:394` | Exponential backoff retry logic |
-| `full_id` generation | Traditional | `llm_extraction.py:1015` | Concatenates `ch{num}_{local_id}` |
+| `full_id` generation | Traditional | `llm_extraction.py` | Concatenates `ch{num}_{local_id}` |
+| `build_block_aware_image_assignments()` | Traditional | `ui_components.py:97` | Assigns shared images to first sub-question, sets `context_from` |
 
 ---
 
@@ -133,8 +134,8 @@ These hardcoded heuristics may need adjustment when input formats change:
 |------|-------------|-----|-------|
 | 1. Source | 100% | 0% | PDF parsing only |
 | 2. Chapters | 60% | 40% | LLM identifies boundaries |
-| 3. Extract | 50% | 50% | LLM finds ranges, traditional extracts text |
-| 4. Format | 30% | 70% | LLM does main work |
+| 3. Extract | 40% | 60% | LLM identifies blocks, traditional extracts text |
+| 4. Format | 40% | 60% | LLM formats blocks, traditional handles image assignment with `build_block_aware_image_assignments()` |
 | 5. Context | 40% | 60% | LLM identifies relationships, traditional merges |
 | 6. QC | 100% | 0% | UI only |
 | 7. Generate | 10% | 90% | LLM generates cards |

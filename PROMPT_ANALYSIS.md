@@ -6,13 +6,23 @@ This document analyzes each LLM prompt for format-specific assumptions that may 
 
 ## Summary of Format Assumptions
 
+### Current Block-Based Prompts
+
 | Prompt | Critical Assumptions | Flexibility Rating |
 |--------|---------------------|-------------------|
 | `identify_chapters` | Medical textbook, QUESTIONS/ANSWERS sections, chapter headers | Low |
+| `identify_question_blocks` | Block structure with context + sub-questions, line markers | Medium |
+| `format_raw_block` | Block contains context, sub-questions, shared discussion | Medium |
+| `associate_context` | Data-driven (has_choices, etc.) | High |
+| `generate_cloze_cards_from_block` | Medical content, block structure with explanations | Medium |
+
+### Legacy Prompts (Deprecated)
+
+| Prompt | Critical Assumptions | Flexibility Rating |
+|--------|---------------------|-------------------|
 | `extract_qa_pairs` | QUESTIONS/ANSWERS sections, A-E choices, numbered questions | Low |
 | `match_images_to_questions` | Question number at END of text before image, specific layout | Very Low |
 | `postprocess_questions` | image_group field, numeric vs letter ID patterns | Medium |
-| `associate_context` | Data-driven (has_choices, etc.) | High |
 | `extract_line_ranges` | QUESTIONS/ANSWERS sections, "Answer X." format, specific layout | Very Low |
 | `format_qa_pair` | A-E choices format, verbatim extraction | Medium |
 | `generate_cloze_cards` | Medical content focus | Medium |
@@ -70,7 +80,65 @@ identify_chapters:
 
 ---
 
-## Prompt 2: `extract_qa_pairs`
+## Prompt 2: `identify_question_blocks` (NEW - Block-Based)
+
+### Purpose
+Identifies question BLOCKS - groups of related questions that share context and possibly images.
+
+### Current Assumptions
+
+```
+- Each block contains: main question number, context text, sub-questions (a, b, c, etc.)
+- Blocks are separated by changes in main question number
+- Uses [LINE:NNNN] markers from preprocessing
+- Uses [IMAGE: filename] markers for image positions
+```
+
+### What Works Well
+- Block-based approach preserves context relationships
+- Line markers enable precise text extraction
+- Handles multi-part questions naturally
+- Output includes both question and answer line ranges
+
+### Format-Specific Issues
+
+| Issue | Current Assumption | Alternative Formats |
+|-------|-------------------|---------------------|
+| Block structure | Context + sub-questions pattern | May have standalone questions, no sub-questions |
+| ID pattern | "1", "1a", "1b" numbering | "1.1", "1.2" or "1-a", "1-b" patterns |
+| Image markers | `[IMAGE: filename]` format | Depends on preprocessing |
+
+---
+
+## Prompt 3: `format_raw_block` (NEW - Block-Based)
+
+### Purpose
+Formats a raw text block into structured JSON with context, sub-questions, and shared discussion.
+
+### Current Assumptions
+
+```
+- Block contains: context area, one or more sub-questions, shared answer/discussion
+- Images in context area are shared by all sub-questions
+- Images near specific sub-questions belong to that sub-question
+- Each sub-question has: local_id, question_text, choices, correct_answer, explanation
+```
+
+### What Works Well
+- Separates context from question-specific content
+- Handles image placement (context vs question-specific)
+- Preserves shared discussion text
+- Outputs normalized choice format (A, B, C, D)
+
+### Post-Processing
+The `build_block_aware_image_assignments()` function in `ui_components.py` handles:
+- Assigning shared images to FIRST sub-question only
+- Setting `context_from` on subsequent sub-questions
+- Enabling image inheritance via `get_images_for_question()`
+
+---
+
+## Prompt 4: `extract_qa_pairs` (LEGACY)
 
 ### Current Assumptions
 

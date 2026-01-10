@@ -94,6 +94,64 @@ def play_completion_sound():
     components.html(sound_js, height=0, width=0)
 
 
+def build_block_aware_image_assignments(formatted_questions: dict) -> dict:
+    """
+    Build image assignments with block-aware context inheritance.
+
+    For questions in the same block:
+    - Shared images (in multiple questions' image_files) → assigned to FIRST sub-question
+    - Question-specific images → assigned to that specific question
+    - Subsequent sub-questions get context_from pointing to first for inheritance
+
+    Args:
+        formatted_questions: Dict of ch_key -> list of question dicts
+
+    Returns:
+        Dict mapping image filenames to question full_ids
+    """
+    image_assignments = {}
+
+    for ch_key, qs in formatted_questions.items():
+        # Group questions by block_id
+        block_first_question = {}  # block_id -> first question's full_id
+
+        # First pass: identify first question per block
+        for q in qs:
+            block_id = q.get("block_id")
+            if not block_id:
+                # No block_id - assign images directly (first come, first served)
+                for img_file in q.get("image_files", []):
+                    if img_file not in image_assignments:
+                        image_assignments[img_file] = q["full_id"]
+                continue
+
+            # Track first question in each block
+            if block_id not in block_first_question:
+                block_first_question[block_id] = q["full_id"]
+
+        # Second pass: assign images and set context_from
+        for q in qs:
+            block_id = q.get("block_id")
+            if not block_id:
+                continue
+
+            first_q_id = block_first_question[block_id]
+
+            # Set context_from for non-first questions in the block
+            if q["full_id"] != first_q_id:
+                if not q.get("context_from"):
+                    q["context_from"] = first_q_id
+
+            # Assign ALL images from this question that aren't already assigned
+            # - Shared images will be assigned to first question (processed first)
+            # - Question-specific images will be assigned to their respective questions
+            for img_file in q.get("image_files", []):
+                if img_file not in image_assignments:
+                    image_assignments[img_file] = q["full_id"]
+
+    return image_assignments
+
+
 def get_selected_model_id() -> str:
     """Get the currently selected Claude model ID."""
     return get_model_id(st.session_state.selected_model)
@@ -262,6 +320,8 @@ def question_sort_key(q_id: str) -> tuple:
 def get_images_for_question(q_id: str) -> list[dict]:
     """
     Get all images for a question, including inherited images from context_from or image_group.
+
+    Returns both directly assigned images AND inherited images from context.
     """
     images = []
     directly_assigned = set()
@@ -273,10 +333,7 @@ def get_images_for_question(q_id: str) -> list[dict]:
             images.append(img)
             directly_assigned.add(img["filename"])
 
-    if images:
-        return images
-
-    # Check for inherited images (context_from or image_group)
+    # Also check for inherited images (context_from or image_group)
     # First check merged questions, then regular questions
     questions_to_check = []
     for ch_key, qs in st.session_state.questions_merged.items():
@@ -286,15 +343,14 @@ def get_images_for_question(q_id: str) -> list[dict]:
 
     for q in questions_to_check:
         if q["full_id"] == q_id:
-            # Check context_from first (for merged context)
+            # Check context_from for inherited images
             context_from = q.get("context_from")
             if context_from:
                 for img in st.session_state.images:
                     assigned_to = st.session_state.image_assignments.get(img["filename"])
                     if assigned_to == context_from and img["filename"] not in directly_assigned:
                         images.append(img)
-                if images:
-                    return images
+                        directly_assigned.add(img["filename"])
 
             # Check image_group (for shared images within a group)
             image_group = q.get("image_group")
@@ -306,8 +362,9 @@ def get_images_for_question(q_id: str) -> list[dict]:
                     assigned_to = st.session_state.image_assignments.get(img["filename"])
                     if assigned_to == base_id and img["filename"] not in directly_assigned:
                         images.append(img)
+                        directly_assigned.add(img["filename"])
 
-            return images
+            break  # Found the question, stop searching
 
     return images
 
@@ -702,12 +759,11 @@ def run_feeling_lucky(pdf_path: str, models: dict, workers: dict):
     st.session_state.questions = formatted_questions
     save_questions()
 
-    # Build image assignments
-    st.session_state.image_assignments = {}
-    for ch_key, qs in formatted_questions.items():
-        for q in qs:
-            for img_file in q.get("image_files", []):
-                st.session_state.image_assignments[img_file] = q["full_id"]
+    # Build image assignments with block-aware context inheritance
+    # (assigns shared images to first sub-question, sets context_from on others)
+    st.session_state.image_assignments = build_block_aware_image_assignments(formatted_questions)
+    st.session_state.questions = formatted_questions  # context_from was set by helper
+    save_questions()
     save_image_assignments()
 
     total_formatted = sum(len(qs) for qs in formatted_questions.values())
@@ -1965,10 +2021,12 @@ def render_format_step():
             st.session_state.questions[selected_ch_key] = formatted_list
             save_questions()
 
-            # Build image assignments for this chapter
-            for q in formatted_list:
-                for img_file in q.get("image_files", []):
-                    st.session_state.image_assignments[img_file] = q["full_id"]
+            # Build image assignments for this chapter with block-aware context inheritance
+            chapter_dict = {selected_ch_key: formatted_list}
+            new_assignments = build_block_aware_image_assignments(chapter_dict)
+            st.session_state.image_assignments.update(new_assignments)
+            st.session_state.questions[selected_ch_key] = formatted_list  # context_from was set by helper
+            save_questions()
             save_image_assignments()
 
             status_text.text("Done!")
@@ -2089,11 +2147,10 @@ def render_format_step():
         st.session_state.questions = formatted_by_chapter
         save_questions()
 
-        # Build image assignments from image_files
-        for ch_key, questions in formatted_by_chapter.items():
-            for q in questions:
-                for img_file in q.get("image_files", []):
-                    st.session_state.image_assignments[img_file] = q["full_id"]
+        # Build image assignments with block-aware context inheritance
+        st.session_state.image_assignments = build_block_aware_image_assignments(formatted_by_chapter)
+        st.session_state.questions = formatted_by_chapter  # context_from was set by helper
+        save_questions()
         save_image_assignments()
 
         # If raw_blocks exist, save them as question_blocks (ready for block-based generation)
@@ -2447,15 +2504,21 @@ def render_context_step():
                 st.markdown(f"### Chapter {ch_key} ({ch_actual} questions" +
                            (f" + {ch_context_only} context-only" if ch_context_only > 0 else "") + ")")
 
-            # Get images - check direct assignment first, then inherited from context
-            q_images = [img for img in st.session_state.images
-                       if assignments_to_use.get(img["filename"]) == q["full_id"]]
+            # Get images - check direct assignment AND inherited from context
+            directly_assigned = set()
+            q_images = []
+            for img in st.session_state.images:
+                if assignments_to_use.get(img["filename"]) == q["full_id"]:
+                    q_images.append(img)
+                    directly_assigned.add(img["filename"])
 
-            # If no direct images and has context_from, inherit images from context question
-            if not q_images and q.get("context_from"):
+            # Also inherit images from context_from (even if there are direct images)
+            if q.get("context_from"):
                 context_id = q.get("context_from")
-                q_images = [img for img in st.session_state.images
-                           if assignments_to_use.get(img["filename"]) == context_id]
+                for img in st.session_state.images:
+                    if assignments_to_use.get(img["filename"]) == context_id:
+                        if img["filename"] not in directly_assigned:
+                            q_images.append(img)
 
             indicators = []
 
@@ -3489,12 +3552,17 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             image_html = ''
             if include_images:
                 # Find images assigned to this question
-                assigned_imgs = [fname for fname, assigned_q in image_assignments.items() if assigned_q == q_id]
+                assigned_imgs = set()
+                for fname, assigned_q in image_assignments.items():
+                    if assigned_q == q_id:
+                        assigned_imgs.add(fname)
 
-                # Also check for inherited images via context_from
-                if not assigned_imgs and q.get('context_from'):
+                # Also include inherited images via context_from (even if there are direct images)
+                if q.get('context_from'):
                     context_id = q['context_from']
-                    assigned_imgs = [fname for fname, assigned_q in image_assignments.items() if assigned_q == context_id]
+                    for fname, assigned_q in image_assignments.items():
+                        if assigned_q == context_id:
+                            assigned_imgs.add(fname)
 
                 for img_fname in assigned_imgs:
                     if img_fname in image_lookup:

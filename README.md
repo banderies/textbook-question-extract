@@ -16,14 +16,16 @@ export ANTHROPIC_API_KEY='sk-ant-...'
 streamlit run scripts/review_gui.py
 ```
 
-Open http://localhost:8501 and follow the 6-step workflow:
+Open http://localhost:8501 and follow the 8-step workflow:
 
 1. **Select Source** - Load your PDF textbook
 2. **Extract Chapters** - AI identifies chapter boundaries
-3. **Extract Questions** - AI extracts Q&A pairs per chapter
-4. **Associate Context** - Link context questions to sub-questions (Q1 → Q1a, Q1b)
-5. **QC Questions** - Review and correct image assignments
-6. **Export** - Generate Anki deck
+3. **Extract Questions** - AI identifies question blocks with line ranges
+4. **Format Questions** - AI formats blocks, assigns images with context inheritance
+5. **Associate Context** - Link context questions to sub-questions (Q1 → Q1a, Q1b)
+6. **QC Questions** - Review and correct image assignments
+7. **Generate** - (Optional) Generate cloze deletion cards
+8. **Export** - Generate Anki deck
 
 ## Requirements
 
@@ -48,7 +50,8 @@ export ANTHROPIC_API_KEY='sk-ant-...'
 ## Features
 
 - **AI-Powered Extraction**: Uses Claude to extract questions, answers, and explanations
-- **Image Linking**: Automatically matches images to questions using flanking text context
+- **Block-Based Processing**: Groups related questions (Q1a, Q1b, Q1c) into blocks that share context
+- **Smart Image Inheritance**: Shared images assigned to first sub-question; others inherit via `context_from`
 - **Context Association**: Merges clinical scenario context into sub-questions
 - **Chapter-Aware IDs**: Questions prefixed with chapter (e.g., `ch1_2a`, `ch8_2a`)
 - **Interactive QC**: Streamlit GUI for reviewing and correcting assignments
