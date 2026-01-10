@@ -95,7 +95,17 @@ def reset_logger():
 CHARS_PER_TOKEN = 3.5
 
 # Default max output tokens (fallback if API query fails)
-DEFAULT_MAX_OUTPUT_TOKENS = 64000
+# Model-specific output token limits
+MODEL_OUTPUT_LIMITS = {
+    "claude-3-5-haiku": 8192,
+    "claude-3-haiku": 4096,
+    "claude-3-5-sonnet": 8192,
+    "claude-3-sonnet": 4096,
+    "claude-3-opus": 4096,
+    "claude-sonnet-4": 64000,
+    "claude-opus-4": 32000,
+}
+DEFAULT_MAX_OUTPUT_TOKENS = 8192  # Conservative default
 
 # Cache for model max tokens
 _model_max_tokens_cache: dict = {}
@@ -687,25 +697,20 @@ def get_model_id(display_name: str) -> str:
 
 def get_model_max_tokens(model_id: str) -> int:
     """
-    Get the maximum output tokens for a model from the API.
-    Caches the result to avoid repeated API calls.
-    Falls back to DEFAULT_MAX_OUTPUT_TOKENS if API call fails.
+    Get the maximum output tokens for a model.
+    Uses MODEL_OUTPUT_LIMITS mapping for known models.
+    Falls back to DEFAULT_MAX_OUTPUT_TOKENS if model not found.
     """
     global _model_max_tokens_cache
 
     if model_id in _model_max_tokens_cache:
         return _model_max_tokens_cache[model_id]
 
-    try:
-        client = get_anthropic_client()
-        if client:
-            model_info = client.models.retrieve(model_id)
-            max_tokens = getattr(model_info, 'max_tokens', None)
-            if max_tokens:
-                _model_max_tokens_cache[model_id] = max_tokens
-                return max_tokens
-    except Exception as e:
-        print(f"Failed to get max tokens for {model_id}: {e}")
+    # Check against known model patterns
+    for pattern, limit in MODEL_OUTPUT_LIMITS.items():
+        if pattern in model_id:
+            _model_max_tokens_cache[model_id] = limit
+            return limit
 
     # Fallback to default
     _model_max_tokens_cache[model_id] = DEFAULT_MAX_OUTPUT_TOKENS
@@ -1571,6 +1576,376 @@ def generate_cloze_cards_llm(
 
         except Exception as e:
             # Retry on connection errors and other transient issues
+            error_name = type(e).__name__
+            if attempt < max_retries and error_name in ('ConnectionError', 'TimeoutError', 'APIConnectionError'):
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: {error_name}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: {error_name} after {attempt + 1} attempts - {e}")
+                return []
+
+    return []
+
+
+# =============================================================================
+# New Block-Based Extraction Functions (v2)
+# =============================================================================
+
+
+def identify_question_blocks_llm(
+    client,
+    chapter_num: int,
+    chapter_text: str,
+    model_id: str,
+    on_progress: callable = None
+) -> list[dict]:
+    """
+    First pass: Identify question BLOCKS (grouped by main question number).
+
+    A block is a main question number (1, 2, 3, etc.) that may have sub-questions.
+    This function identifies where each block starts and ends.
+
+    Args:
+        client: Anthropic client
+        chapter_num: Chapter number for logging
+        chapter_text: Line-numbered chapter text with [LINE:NNNN] markers
+        model_id: Model to use
+        on_progress: Optional callback (tokens, response_text) for progress updates
+
+    Returns:
+        List of block boundary dicts with keys:
+        - block_id: The main question number (e.g., "1", "2", "15")
+        - question_start: First line of the block's question content
+        - question_end: Last line of the block's question content
+        - answer_start: First line of the block's answer content (0 if none)
+        - answer_end: Last line of the block's answer content (0 if none)
+    """
+    logger = get_extraction_logger()
+    log_prefix = f"Chapter {chapter_num} (block identification)"
+
+    prompt = get_prompt("identify_question_blocks", chapter_text=chapter_text)
+
+    try:
+        logger.debug(f"{log_prefix}: Calling API with model {model_id}")
+
+        response_text, usage = stream_message(
+            client,
+            model_id,
+            messages=[{"role": "user", "content": prompt}],
+            on_progress=on_progress
+        )
+
+        input_tokens = usage["input_tokens"]
+        output_tokens = usage["output_tokens"]
+        stop_reason = usage["stop_reason"]
+
+        logger.info(
+            f"{log_prefix}: API response - "
+            f"input={input_tokens:,}, output={output_tokens:,}, stop={stop_reason}"
+        )
+
+        if stop_reason == "max_tokens":
+            logger.warning(f"{log_prefix}: Response may be truncated")
+
+        # Parse pipe-delimited format: block_id|q_start|q_end|a_start|a_end
+        blocks = []
+        for line in response_text.strip().split('\n'):
+            line = line.strip()
+            if not line or '|' not in line:
+                continue
+
+            parts = line.split('|')
+            if len(parts) >= 5:
+                try:
+                    block = {
+                        "block_id": parts[0].strip(),
+                        "question_start": int(parts[1].strip()),
+                        "question_end": int(parts[2].strip()),
+                        "answer_start": int(parts[3].strip()),
+                        "answer_end": int(parts[4].strip())
+                    }
+                    blocks.append(block)
+                except ValueError:
+                    # Skip malformed lines
+                    logger.debug(f"{log_prefix}: Skipping malformed line: {line}")
+                    continue
+
+        logger.info(f"{log_prefix}: Found {len(blocks)} blocks")
+        return blocks
+
+    except Exception as e:
+        logger.error(f"{log_prefix}: API error - {type(e).__name__}: {e}")
+        return []
+
+
+def format_raw_block_llm(
+    client,
+    block_id: str,
+    question_text: str,
+    answer_text: str,
+    model_id: str,
+    chapter_num: int,
+    max_retries: int = 5
+) -> dict:
+    """
+    Second pass: Format a raw question/answer block into structured JSON.
+
+    Takes raw text (with line numbers preserved) and parses it into
+    structured data including context, sub-questions, choices, and explanations.
+
+    Args:
+        client: Anthropic client
+        block_id: The block identifier (e.g., "1", "2")
+        question_text: Raw question text (may include [LINE:NNNN] markers)
+        answer_text: Raw answer text (may include [LINE:NNNN] markers)
+        model_id: Model to use
+        chapter_num: Chapter number for logging
+        max_retries: Maximum retry attempts for rate limit errors
+
+    Returns:
+        Dict with structured block data including context, sub_questions, shared_discussion
+    """
+    import time
+    import anthropic
+
+    logger = get_extraction_logger()
+    log_prefix = f"Ch{chapter_num} Block {block_id}"
+
+    prompt = get_prompt(
+        "format_raw_block",
+        block_id=f"ch{chapter_num}_{block_id}",
+        question_text=question_text,
+        answer_text=answer_text
+    )
+
+    for attempt in range(max_retries + 1):
+        try:
+            # Use 8000 tokens as max (compatible with all models including Haiku)
+            response_text, usage = stream_message(
+                client,
+                model_id,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=8000
+            )
+
+            logger.debug(
+                f"{log_prefix}: in={usage['input_tokens']}, "
+                f"out={usage['output_tokens']}"
+            )
+
+            # Extract JSON from markdown code blocks if present
+            if "```" in response_text:
+                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+                if match:
+                    response_text = match.group(1)
+
+            # Try parsing JSON, with repair attempt on failure
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError:
+                repaired = repair_json(response_text)
+                try:
+                    result = json.loads(repaired)
+                    logger.info(f"{log_prefix}: JSON repaired successfully")
+                    return result
+                except json.JSONDecodeError:
+                    raise
+
+        except anthropic.RateLimitError as e:
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: Rate limited, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: Rate limit exceeded after {max_retries} retries")
+                return _create_error_block(block_id, chapter_num, question_text, answer_text, f"Rate limit exceeded: {e}")
+
+        except anthropic.APIStatusError as e:
+            if e.status_code >= 500 and attempt < max_retries:
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: API error {e.status_code}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: API error {e.status_code} after {attempt + 1} attempts - {e}")
+                return _create_error_block(block_id, chapter_num, question_text, answer_text, str(e))
+
+        except json.JSONDecodeError as e:
+            logger.error(f"{log_prefix}: JSON parse error - {e}")
+            return _create_error_block(block_id, chapter_num, question_text, answer_text, str(e))
+
+        except Exception as e:
+            error_name = type(e).__name__
+            if attempt < max_retries and error_name in ('ConnectionError', 'TimeoutError', 'APIConnectionError'):
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: {error_name}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: {error_name} after {attempt + 1} attempts - {e}")
+                return _create_error_block(block_id, chapter_num, question_text, answer_text, str(e))
+
+    return _create_error_block(block_id, chapter_num, question_text, answer_text, "max_retries_exhausted")
+
+
+def _create_error_block(block_id: str, chapter_num: int, question_text: str, answer_text: str, error: str) -> dict:
+    """Create a fallback block structure when formatting fails."""
+    return {
+        "block_id": f"ch{chapter_num}_{block_id}",
+        "context": {"text": "", "image_files": []},
+        "sub_questions": [{
+            "local_id": block_id,
+            "question_text": question_text,
+            "choices": {},
+            "correct_answer": "",
+            "explanation": answer_text,
+            "image_files": []
+        }],
+        "shared_discussion": {
+            "imaging_findings": "",
+            "discussion": "",
+            "differential_diagnosis": "",
+            "references": [],
+            "full_text": ""
+        },
+        "error": error
+    }
+
+
+# =============================================================================
+# Cloze Card Generation from Blocks
+# =============================================================================
+
+
+def generate_cloze_cards_from_block_llm(
+    client,
+    block: dict,
+    chapter_num: int,
+    model_id: str,
+    max_retries: int = 5
+) -> list[dict]:
+    """
+    Generate cloze deletion cards from an entire question block.
+
+    Unlike generate_cloze_cards_llm which processes individual questions,
+    this function provides the full block context including shared discussion
+    to generate more accurate cards without hallucination.
+
+    Args:
+        client: Anthropic client
+        block: Question block dict with context, shared_discussion, sub_questions
+        chapter_num: Chapter number for logging
+        model_id: Model to use
+        max_retries: Maximum retry attempts for rate limit errors
+
+    Returns:
+        List of generated card dicts with keys:
+        - cloze_text: Text with {{c1::...}} cloze syntax
+        - learning_point: Brief description
+        - confidence: "high" or "medium"
+        - category: anatomy, pathology, imaging, clinical, differential, statistics
+        - source_sub_question: Which sub-question this came from, or "shared"
+    """
+    import time
+    import anthropic
+
+    logger = get_extraction_logger()
+    block_id = block.get("block_id", f"ch{chapter_num}_block_{block.get('block_label', 'unknown')}")
+    log_prefix = f"Cloze {block_id}"
+
+    # Build sub-questions summary
+    sub_questions_parts = []
+    for sq in block.get("sub_questions", []):
+        sq_text = f"Sub-question {sq.get('local_id', '?')}:\n"
+        sq_text += f"  Question: {sq.get('question_text', '')}\n"
+        sq_text += f"  Correct Answer: {sq.get('correct_answer', '')}\n"
+        sq_text += f"  Specific Answer: {sq.get('specific_answer', '')}\n"
+        sub_questions_parts.append(sq_text)
+    sub_questions_summary = "\n".join(sub_questions_parts) if sub_questions_parts else "(no sub-questions)"
+
+    # Get shared discussion components
+    shared = block.get("shared_discussion", {})
+    imaging_findings = shared.get("imaging_findings", "") or "(none)"
+    discussion = shared.get("discussion", "") or "(none)"
+    differential = shared.get("differential_diagnosis", "") or "(none)"
+
+    # Check if there's enough content to generate cards
+    total_content = (
+        block.get("context", {}).get("text", "") +
+        sub_questions_summary +
+        imaging_findings + discussion + differential
+    )
+    if len(total_content) < 100:
+        logger.debug(f"{log_prefix}: Skipping - content too short ({len(total_content)} chars)")
+        return []
+
+    prompt = get_prompt(
+        "generate_cloze_cards_from_block",
+        block_id=block_id,
+        context_text=block.get("context", {}).get("text", "") or "(no shared context)",
+        sub_questions_summary=sub_questions_summary,
+        imaging_findings=imaging_findings,
+        discussion=discussion,
+        differential_diagnosis=differential
+    )
+
+    for attempt in range(max_retries + 1):
+        try:
+            response_text, usage = stream_message(
+                client,
+                model_id,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=8000  # Blocks may generate more cards
+            )
+
+            logger.debug(
+                f"{log_prefix}: in={usage['input_tokens']}, "
+                f"out={usage['output_tokens']}"
+            )
+
+            # Extract JSON from markdown code blocks if present
+            if "```" in response_text:
+                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+                if match:
+                    response_text = match.group(1)
+
+            # Try parsing JSON, with repair attempt on failure
+            try:
+                cards = json.loads(response_text)
+            except json.JSONDecodeError:
+                repaired = repair_json(response_text)
+                try:
+                    cards = json.loads(repaired)
+                    logger.info(f"{log_prefix}: JSON repaired successfully")
+                except json.JSONDecodeError:
+                    logger.error(f"{log_prefix}: JSON parse error even after repair")
+                    return []
+
+            if not isinstance(cards, list):
+                logger.warning(f"{log_prefix}: Expected list, got {type(cards).__name__}")
+                return []
+
+            logger.info(f"{log_prefix}: Generated {len(cards)} cloze cards from block")
+            return cards
+
+        except anthropic.RateLimitError as e:
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: Rate limited, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: Rate limit exceeded after {max_retries} retries")
+                return []
+
+        except anthropic.APIStatusError as e:
+            if e.status_code >= 500 and attempt < max_retries:
+                wait_time = 2 ** attempt
+                logger.warning(f"{log_prefix}: API error {e.status_code}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"{log_prefix}: API error {e.status_code} after {attempt + 1} attempts - {e}")
+                return []
+
+        except Exception as e:
             error_name = type(e).__name__
             if attempt < max_retries and error_name in ('ConnectionError', 'TimeoutError', 'APIConnectionError'):
                 wait_time = 2 ** attempt

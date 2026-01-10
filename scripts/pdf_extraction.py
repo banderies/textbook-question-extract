@@ -452,7 +452,8 @@ def extract_lines_by_range_mapped(
     lines: list[str],
     start: int,
     end: int,
-    line_mapping: dict
+    line_mapping: dict,
+    preserve_line_numbers: bool = False
 ) -> str:
     """
     Extract text from lines array using a line mapping for translation.
@@ -465,9 +466,10 @@ def extract_lines_by_range_mapped(
         start: Starting line number (1-indexed, chapter-relative)
         end: Ending line number (inclusive, chapter-relative)
         line_mapping: Dict mapping chapter line numbers to global array indices
+        preserve_line_numbers: If True, keep [LINE:NNNN] prefixes for traceability
 
     Returns:
-        The extracted text (without line number prefixes)
+        The extracted text (with or without line number prefixes based on preserve_line_numbers)
     """
     if start <= 0 or end < start or not line_mapping:
         return ""
@@ -505,8 +507,8 @@ def extract_lines_by_range_mapped(
     for i in range(start_idx, min(end_idx + 1, len(lines))):
         line = lines[i]
 
-        # Remove the [LINE:NNNN] prefix if present
-        if line.startswith("[LINE:"):
+        # Remove the [LINE:NNNN] prefix if not preserving
+        if not preserve_line_numbers and line.startswith("[LINE:"):
             bracket_end = line.find("]")
             if bracket_end > 0:
                 line = line[bracket_end + 2:]  # +2 to skip "] "

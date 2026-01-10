@@ -543,3 +543,197 @@ generate_cloze_cards:
     Categories: anatomy, pathology, imaging, clinical, differential, statistics, mechanism
 
     If no suitable content for cloze cards, return: []
+
+identify_question_blocks:
+  description: "Identify question BLOCKS (grouped by main question number) with line ranges"
+  prompt: |
+    Identify ALL question blocks in this chapter, starting from block 1.
+
+    TEXT FORMAT:
+    - Each line starts with [LINE:NNNN] marker
+    - Page breaks appear as [PAGE N] - content may span multiple pages
+    - Questions section comes first, then answers section
+
+    WHAT IS A BLOCK?
+    A block groups related content by main question number:
+    - Block "1" = all content for question 1 (context + 1a + 1b + 1c, etc.)
+    - Block "2" = all content for question 2 (context + 2a + 2b, etc.)
+    - Standalone questions (no sub-parts) are their own block
+
+    QUESTION SECTION (what to capture in question_start to question_end):
+    - Clinical context/scenario (e.g., "A 55-year-old male presents with...")
+    - All sub-questions for this block (1a, 1b, 1c, etc.)
+    - ALL answer choices (A, B, C, D) for each sub-question
+    - IMPORTANT: Choices may appear on lines AFTER the question text, possibly across page breaks
+    - question_end should be the LAST line containing choices for this block, just before the next block's context begins
+
+    ANSWER SECTION (what to capture in answer_start to answer_end):
+    The answer section contains TWO types of content - capture ALL of it:
+    1. SPECIFIC ANSWERS: Lines like "1a Answer B." or "Answer 1a. B." with brief explanations
+    2. SHARED DISCUSSION: Additional educational content that follows, including:
+       - "Imaging Findings:" sections
+       - "Discussion:" sections
+       - "Differential Diagnosis:" sections
+       - "References:" sections
+       - Any other explanatory text before the next block's answers begin
+
+    HOW TO FIND BOUNDARIES:
+    - question_start: First line of this block (usually the main number with context, e.g., "1  A 55-year-old...")
+    - question_end: Last line of choices before the NEXT block's number appears
+    - answer_start: First line of answers for this block (e.g., "1a  Answer B." or "Answer 1a.")
+    - answer_end: Last line before the next block's answer section begins (include all discussion content)
+
+    CRITICAL: Start from block 1. Do not skip any blocks. Scan from the beginning of the text.
+
+    OUTPUT FORMAT - one line per block, pipe-delimited with ONLY integers:
+    block_id|question_start|question_end|answer_start|answer_end
+
+    IMPORTANT: Output ONLY the line NUMBERS (integers), not the line content.
+    Extract the number from [LINE:NNNN] markers - output just NNNN as an integer.
+
+    Example: If block 1 starts at [LINE:0005] and ends at [LINE:0015], with answers from [LINE:0288] to [LINE:0321]:
+    1|5|15|288|321
+
+    Use 0 for answer_start and answer_end if no answer section exists for a block.
+    Output ONLY the pipe-delimited lines with integers, nothing else.
+
+    CHAPTER TEXT:
+    {chapter_text}
+
+format_raw_block:
+  description: "Format a raw question/answer block into structured JSON"
+  prompt: |
+    Parse this raw question block into structured JSON.
+
+    BLOCK ID: {block_id}
+
+    RAW QUESTION TEXT:
+    {question_text}
+
+    RAW ANSWER TEXT:
+    {answer_text}
+
+    PARSING RULES:
+
+    1. IGNORE [LINE:NNNN] markers - they are metadata only.
+
+    2. FIND THE QUESTION IDENTIFIERS in the text:
+       - Look for numbers like "1", "2", "3" OR sub-question IDs like "1a", "1b", "2a", "2b"
+       - These may appear on their OWN LINE, separate from the question text
+       - Example: "...decreased susceptibility\n1\nartifact?" means question ID is "1"
+       - Example: "What is the diagnosis?\n2a\nA. Option..." means question ID is "2a"
+
+    3. DETERMINE BLOCK TYPE:
+       - STANDALONE: Block has only one question (e.g., just "1" or "3")
+       - MULTI-PART: Block has sub-questions (e.g., "2a", "2b" under context "2")
+
+    4. EXTRACT CONTEXT (for multi-part blocks):
+       - Text that introduces the scenario BEFORE the first sub-question
+       - Example: "A patient presents for arthrogram..." before "2a What is..."
+
+    5. FOR EACH QUESTION/SUB-QUESTION, extract:
+       - local_id: The ACTUAL ID from the text (e.g., "1", "2a", "3", "15b")
+       - question_text: The question WITHOUT choices
+       - choices: The A/B/C/D options
+       - correct_answer: The letter (find in answer text: "Answer A" or "2a Answer B")
+       - explanation: The specific explanation for THIS question
+
+    6. IMAGE PLACEMENT ([IMAGE: filename.jpeg] markers):
+       - Images in CONTEXT area (before any sub-question) → context.image_files
+       - Images near a SPECIFIC sub-question → that sub_question.image_files
+       - When in doubt, put images in context.image_files (they apply to all sub-questions)
+
+    7. SHARED DISCUSSION (from answer section):
+       - Imaging Findings, Discussion, Differential Diagnosis, References
+       - This content applies to ALL questions in the block
+
+    OUTPUT FORMAT - Return ONLY valid JSON:
+    {{
+      "block_id": "{block_id}",
+      "context": {{
+        "text": "Shared scenario text (empty string if standalone question)",
+        "image_files": ["context_image.jpeg"]
+      }},
+      "sub_questions": [
+        {{
+          "local_id": "2a",
+          "question_text": "Question text only, no choices",
+          "choices": {{"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"}},
+          "correct_answer": "B",
+          "explanation": "Brief explanation for this specific question",
+          "image_files": ["question_specific_image.jpeg"]
+        }}
+      ],
+      "shared_discussion": {{
+        "imaging_findings": "Imaging findings text if present",
+        "discussion": "Discussion text if present",
+        "differential_diagnosis": "Differential diagnosis text if present",
+        "references": ["Reference 1", "Reference 2"],
+        "full_text": "All additional educational content"
+      }}
+    }}
+
+    CRITICAL:
+    - Use the ACTUAL question ID from the text, not just the block_id
+    - For standalone questions, sub_questions has ONE entry with local_id = the question number
+    - Copy text VERBATIM (except for line markers)
+
+generate_cloze_cards_from_block:
+  description: "Generate cloze cards from an entire question block with full context"
+  prompt: |
+    You are creating Anki cloze deletion flashcards from a medical textbook question block.
+
+    This is a COMPLETE block containing all related content - use ALL of it.
+
+    BLOCK ID: {block_id}
+    CHAPTER: {chapter_num}
+
+    CONTEXT (clinical scenario):
+    {context_text}
+
+    SUB-QUESTIONS AND SPECIFIC ANSWERS:
+    {sub_questions_text}
+
+    SHARED DISCUSSION (applies to all sub-questions):
+    {shared_discussion_text}
+
+    ============================================================
+    TASK: Create cloze cards from ALL content in this block
+    ============================================================
+
+    You have access to:
+    1. The clinical scenario/context
+    2. Each sub-question with its specific answer
+    3. Shared discussion content (imaging findings, differential diagnosis, etc.)
+
+    Extract facts from ALL of these sources. The shared discussion is especially valuable
+    as it contains detailed educational content that applies to the entire case.
+
+    For each card, indicate which sub-question it relates to most (if applicable).
+
+    CLOZE SYNTAX:
+    - Use {{{{c1::text::hint}}}} format with semantic hints
+    - BOLD all clozes using <b> tags
+    - BOLD important terms for visual emphasis
+    - Use c1, c2, c3 on same card for related facts from same sentence
+    - Create separate cards for unrelated facts
+
+    Return ONLY a JSON array:
+    [
+      {{
+        "cloze_text": "<b>{{{{c1::Finding::type}}}}</b> is seen in this <b>condition</b>.",
+        "learning_point": "Key concept",
+        "confidence": "high",
+        "category": "imaging",
+        "source_sub_question_id": "1a"
+      }},
+      ...
+    ]
+
+    source_sub_question_id should be:
+    - The specific sub-question ID if the fact relates to a specific answer
+    - Empty string "" if the fact comes from shared discussion applicable to all
+
+    Categories: anatomy, pathology, imaging, clinical, differential, statistics, mechanism
+
+    If no suitable content, return: []

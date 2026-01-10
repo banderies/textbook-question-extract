@@ -21,7 +21,8 @@ from state_management import (
     load_settings, load_qc_progress, save_settings, save_chapters,
     save_questions, save_raw_questions, save_images, save_pages, save_image_assignments,
     save_questions_merged, save_image_assignments_merged, save_qc_progress,
-    get_raw_questions_file, get_questions_file
+    get_raw_questions_file, get_questions_file,
+    get_raw_blocks_file, get_question_blocks_file, save_raw_blocks, save_question_blocks
 )
 from pdf_extraction import (
     extract_images_from_pdf, assign_chapters_to_images,
@@ -35,7 +36,9 @@ from llm_extraction import (
     extract_line_ranges_llm, format_qa_pair_llm,
     match_images_to_questions_llm, associate_context_llm, add_page_numbers_to_questions,
     load_prompts, save_prompts, reload_prompts, get_prompt, stream_message,
-    get_extraction_logger, get_log_file_path, reset_logger
+    get_extraction_logger, get_log_file_path, reset_logger,
+    generate_cloze_cards_from_block_llm,
+    identify_question_blocks_llm, format_raw_block_llm
 )
 
 
@@ -1278,6 +1281,9 @@ def render_questions_step():
     The LLM identifies line ranges for each question/answer, then the raw text is extracted.
     """)
 
+    # Block extraction is always enabled (v2 mode)
+    st.info("**Block extraction mode:** LLM identifies block boundaries, raw text preserved with line numbers for Step 4 formatting.")
+
     if not st.session_state.chapters:
         st.warning("Please extract chapters first (Step 2)")
         return
@@ -1332,8 +1338,8 @@ def render_questions_step():
             key="extract_workers"
         )
 
-    # Helper function to extract a single chapter
-    def extract_single_chapter(ch_idx: int, pages_with_lines: list, lines_with_images: list, on_progress=None):
+    def extract_blocks_from_chapter(ch_idx: int, pages_with_lines: list, lines_with_images: list, on_progress=None):
+        """Extract question blocks with raw text and line numbers preserved."""
         ch = st.session_state.chapters[ch_idx]
         ch_num = ch["chapter_number"]
         ch_key = f"ch{ch_num}"
@@ -1345,38 +1351,44 @@ def render_questions_step():
             lines_with_images, pages_with_lines, start_page, end_page
         )
 
-        line_ranges = extract_line_ranges_llm(get_anthropic_client(), ch_num, ch_text, model_id, on_progress=on_progress)
+        # Use the new simpler block identification
+        blocks = identify_question_blocks_llm(get_anthropic_client(), ch_num, ch_text, model_id, on_progress=on_progress)
 
-        if not line_ranges:
-            logger.warning(f"Chapter {ch_num}: No line ranges extracted")
+        if not blocks:
+            logger.warning(f"Chapter {ch_num}: No blocks extracted")
             return []
 
-        raw_questions = []
-        for lr in line_ranges:
-            q_id = lr.get("question_id", "?")
-            q_start = lr.get("question_start", 0)
-            q_end = lr.get("question_end", 0)
-            a_start = lr.get("answer_start", 0)
-            a_end = lr.get("answer_end", 0)
+        raw_blocks = []
+        for block in blocks:
+            block_id = block.get("block_id", "?")
+            q_start = block.get("question_start", 0)
+            q_end = block.get("question_end", 0)
+            a_start = block.get("answer_start", 0)
+            a_end = block.get("answer_end", 0)
 
-            q_text = extract_lines_by_range_mapped(lines_with_images, q_start, q_end, line_mapping) if q_start > 0 else ""
-            a_text = extract_lines_by_range_mapped(lines_with_images, a_start, a_end, line_mapping) if a_start > 0 else ""
+            # Extract raw text WITH line numbers preserved for traceability
+            question_text_raw = extract_lines_by_range_mapped(
+                lines_with_images, q_start, q_end, line_mapping, preserve_line_numbers=True
+            ) if q_start > 0 else ""
 
-            raw_questions.append({
-                "full_id": f"ch{ch_num}_{q_id}",
-                "local_id": q_id,
+            answer_text_raw = extract_lines_by_range_mapped(
+                lines_with_images, a_start, a_end, line_mapping, preserve_line_numbers=True
+            ) if a_start > 0 else ""
+
+            raw_blocks.append({
+                "block_id": f"ch{ch_num}_{block_id}",
+                "block_label": block_id,
                 "chapter": ch_num,
                 "question_start": q_start,
                 "question_end": q_end,
                 "answer_start": a_start,
                 "answer_end": a_end,
-                "correct_letter": lr.get("correct_letter", ""),
-                "image_files": lr.get("image_files", []),
-                "question_text": q_text,
-                "answer_text": a_text
+                "question_text_raw": question_text_raw,  # Raw text with line numbers
+                "answer_text_raw": answer_text_raw,       # Raw text with line numbers
+                "formatted": False  # Will be set to True after Step 4 formatting
             })
 
-        return raw_questions
+        return raw_blocks
 
     with btn_col1:
         if st.button(f"Extract Chapter {ch_num}", type="primary"):
@@ -1394,23 +1406,17 @@ def render_questions_step():
 
                 progress_text.text(f"Extracting Chapter {ch_num}... Streaming response...")
 
-                # Progress callback for streaming
-                def update_progress(tokens, text):
-                    # Count questions found so far by counting question_id occurrences
-                    q_count = text.count('"question_id"')
-                    progress_text.text(f"Extracting Chapter {ch_num}... {tokens} tokens, ~{q_count} questions found")
-
-                raw_questions = extract_single_chapter(selected_ch_idx, pages_with_lines, lines_with_images, update_progress)
-
-                if raw_questions:
-                    st.session_state.raw_questions[ch_key] = raw_questions
-                    save_raw_questions()
+                # Block extraction with raw text and line numbers preserved
+                raw_blocks = extract_blocks_from_chapter(selected_ch_idx, pages_with_lines, lines_with_images)
+                if raw_blocks:
+                    st.session_state.raw_blocks[ch_key] = raw_blocks
+                    save_raw_blocks()
                     progress_text.empty()
-                    st.success(f"Extracted {len(raw_questions)} raw Q&A pairs from Chapter {ch_num}")
+                    st.success(f"Extracted {len(raw_blocks)} blocks from Chapter {ch_num}")
                     play_completion_sound()
                 else:
                     progress_text.empty()
-                    st.warning(f"No questions extracted from Chapter {ch_num}")
+                    st.warning(f"No blocks extracted from Chapter {ch_num}")
                 st.rerun()
 
     with btn_col2:
@@ -1454,88 +1460,89 @@ def render_questions_step():
                     "line_mapping": line_mapping
                 })
 
-            # Worker function for parallel extraction
-            def extract_chapter_worker(ch_data: dict) -> tuple[str, list]:
-                """Extract a single chapter. Returns (ch_key, raw_questions)."""
+            # Worker function for block extraction with raw text and line numbers
+            def extract_block_worker(ch_data: dict) -> tuple[str, list]:
+                """Extract blocks from a chapter. Returns (ch_key, raw_blocks)."""
                 ch_num = ch_data["ch_num"]
                 ch_key = ch_data["ch_key"]
                 ch_text = ch_data["ch_text"]
                 line_mapping = ch_data["line_mapping"]
 
-                line_ranges = extract_line_ranges_llm(
+                # Use block identification LLM
+                blocks = identify_question_blocks_llm(
                     get_anthropic_client(), ch_num, ch_text, model_id
                 )
 
-                if not line_ranges:
-                    logger.warning(f"Chapter {ch_num}: No line ranges extracted")
+                if not blocks:
+                    logger.warning(f"Chapter {ch_num}: No blocks extracted")
                     return ch_key, []
 
-                raw_questions = []
-                for lr in line_ranges:
-                    q_id = lr.get("question_id", "?")
-                    q_start = lr.get("question_start", 0)
-                    q_end = lr.get("question_end", 0)
-                    a_start = lr.get("answer_start", 0)
-                    a_end = lr.get("answer_end", 0)
+                raw_blocks = []
+                for block in blocks:
+                    block_id = block.get("block_id", "?")
+                    q_start = block.get("question_start", 0)
+                    q_end = block.get("question_end", 0)
+                    a_start = block.get("answer_start", 0)
+                    a_end = block.get("answer_end", 0)
 
-                    q_text = extract_lines_by_range_mapped(lines_with_images, q_start, q_end, line_mapping) if q_start > 0 else ""
-                    a_text = extract_lines_by_range_mapped(lines_with_images, a_start, a_end, line_mapping) if a_start > 0 else ""
+                    # Extract raw text WITH line numbers preserved
+                    question_text_raw = extract_lines_by_range_mapped(
+                        lines_with_images, q_start, q_end, line_mapping, preserve_line_numbers=True
+                    ) if q_start > 0 else ""
 
-                    raw_questions.append({
-                        "full_id": f"ch{ch_num}_{q_id}",
-                        "local_id": q_id,
+                    answer_text_raw = extract_lines_by_range_mapped(
+                        lines_with_images, a_start, a_end, line_mapping, preserve_line_numbers=True
+                    ) if a_start > 0 else ""
+
+                    raw_blocks.append({
+                        "block_id": f"ch{ch_num}_{block_id}",
+                        "block_label": block_id,
                         "chapter": ch_num,
                         "question_start": q_start,
                         "question_end": q_end,
                         "answer_start": a_start,
                         "answer_end": a_end,
-                        "correct_letter": lr.get("correct_letter", ""),
-                        "image_files": lr.get("image_files", []),
-                        "question_text": q_text,
-                        "answer_text": a_text
+                        "question_text_raw": question_text_raw,
+                        "answer_text_raw": answer_text_raw,
+                        "formatted": False
                     })
 
-                logger.info(f"Chapter {ch_num}: Extracted {len(raw_questions)} raw Q&A pairs")
-                return ch_key, raw_questions
+                logger.info(f"Chapter {ch_num}: Extracted {len(raw_blocks)} blocks with line numbers")
+                return ch_key, raw_blocks
 
             # Extract chapters in parallel
             status_text.text(f"Extracting {total_chapters} chapters with {max_workers} parallel workers...")
             completed = 0
             in_progress = set()
-            results = {}
+            block_results = {}
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all chapter extraction tasks
                 future_to_ch = {
-                    executor.submit(extract_chapter_worker, ch_data): ch_data["ch_num"]
+                    executor.submit(extract_block_worker, ch_data): ch_data["ch_num"]
                     for ch_data in chapter_data
                 }
 
-                # Track in-progress chapters
                 for ch_data in chapter_data[:max_workers]:
                     in_progress.add(ch_data["ch_num"])
                 chapter_status.text(f"In progress: Ch {', Ch '.join(map(str, sorted(in_progress)))}")
 
-                # Process completed futures as they finish
                 for future in as_completed(future_to_ch):
                     ch_num = future_to_ch[future]
                     try:
-                        ch_key, raw_questions = future.result()
-                        results[ch_key] = raw_questions
-                        # Save incrementally after each chapter completes
-                        st.session_state.raw_questions[ch_key] = raw_questions
-                        save_raw_questions()
+                        ch_key, raw_blocks = future.result()
+                        block_results[ch_key] = raw_blocks
+                        st.session_state.raw_blocks[ch_key] = raw_blocks
+                        save_raw_blocks()
                     except Exception as e:
                         logger.error(f"Chapter {ch_num}: Extraction failed - {e}")
-                        results[f"ch{ch_num}"] = []
+                        block_results[f"ch{ch_num}"] = []
 
                     completed += 1
                     in_progress.discard(ch_num)
 
-                    # Add next chapter to in-progress set
                     if completed + len(in_progress) <= total_chapters:
                         for ch_data in chapter_data:
-                            if ch_data["ch_num"] not in in_progress and f"ch{ch_data['ch_num']}" not in results:
+                            if ch_data["ch_num"] not in in_progress and f"ch{ch_data['ch_num']}" not in block_results:
                                 in_progress.add(ch_data["ch_num"])
                                 break
 
@@ -1546,54 +1553,50 @@ def render_questions_step():
                     else:
                         chapter_status.empty()
 
-            # Final save (in case session state differs from results)
-            st.session_state.raw_questions = results
-            save_raw_questions()
+            st.session_state.raw_blocks = block_results
+            save_raw_blocks()
             status_text.text("Done!")
             chapter_status.empty()
 
-            total_raw = sum(len(qs) for qs in results.values())
-            st.success(f"Extracted {total_raw} raw Q&A pairs from {total_chapters} chapters")
+            total_blocks = sum(len(bs) for bs in block_results.values())
+            st.success(f"Extracted {total_blocks} blocks from {total_chapters} chapters")
             play_completion_sound()
-            st.info("**Next:** Go to **Step 4: Format Questions** to format the raw Q&A pairs.")
+            st.info("**Next:** Go to **Step 4: Format Questions** to format the raw blocks.")
             st.rerun()
 
-    # Display raw questions if available
-    raw_questions = st.session_state.get("raw_questions", {})
-    if raw_questions:
+    # Display raw blocks if available
+    raw_blocks = st.session_state.get("raw_blocks", {})
+    if raw_blocks:
         st.markdown("---")
-        st.subheader("Raw Extracted Q&A Pairs")
+        st.subheader("Raw Extracted Blocks")
 
-        total_raw = sum(len(qs) for qs in raw_questions.values())
-        st.success(f"Total: {total_raw} raw Q&A pairs across {len(raw_questions)} chapters")
+        total_blocks = sum(len(bs) for bs in raw_blocks.values())
+        st.success(f"Total: {total_blocks} blocks across {len(raw_blocks)} chapters")
         st.info("**Next:** Go to **Step 4: Format Questions** to format these into structured data.")
 
         # Chapter selector for preview
-        ch_options = sort_chapter_keys(raw_questions.keys())
+        ch_options = sort_chapter_keys(raw_blocks.keys())
         if ch_options:
             selected_ch = st.selectbox("Preview chapter:", ch_options, key="raw_preview_ch")
 
-            if selected_ch and selected_ch in raw_questions:
-                ch_raw = raw_questions[selected_ch]
-                st.caption(f"{len(ch_raw)} Q&A pairs in {selected_ch}")
+            if selected_ch and selected_ch in raw_blocks:
+                ch_raw = raw_blocks[selected_ch]
+                st.caption(f"{len(ch_raw)} blocks in {selected_ch}")
 
-                for rq in ch_raw:
-                    q_preview = rq["question_text"][:100] + "..." if len(rq["question_text"]) > 100 else rq["question_text"]
-                    img_indicator = f" [{len(rq['image_files'])} img]" if rq["image_files"] else ""
+                for block in ch_raw:
+                    block_label = block.get("block_label", "?")
+                    q_preview = block.get("question_text_raw", "")[:100] + "..." if len(block.get("question_text_raw", "")) > 100 else block.get("question_text_raw", "")
+                    formatted_indicator = " [formatted]" if block.get("formatted", False) else ""
 
-                    with st.expander(f"Q{rq['local_id']}{img_indicator}: {q_preview}"):
-                        st.markdown(f"**Lines:** Q={rq['question_start']}-{rq['question_end']}, A={rq['answer_start']}-{rq['answer_end']}")
-                        if rq["correct_letter"]:
-                            st.markdown(f"**Correct:** {rq['correct_letter']}")
-                        if rq["image_files"]:
-                            st.markdown(f"**Images:** {', '.join(rq['image_files'])}")
+                    with st.expander(f"Block {block_label}{formatted_indicator}: {q_preview}"):
+                        st.markdown(f"**Lines:** Q={block['question_start']}-{block['question_end']}, A={block['answer_start']}-{block['answer_end']}")
 
-                        st.markdown("**Question Text:**")
-                        st.text_area("", rq["question_text"], height=150, key=f"raw_q_{rq['full_id']}", disabled=True)
+                        st.markdown("**Question Text (raw with line numbers):**")
+                        st.text_area("", block.get("question_text_raw", ""), height=200, key=f"raw_q_{block['block_id']}", disabled=True)
 
-                        if rq["answer_text"]:
-                            st.markdown("**Answer Text:**")
-                            st.text_area("", rq["answer_text"], height=150, key=f"raw_a_{rq['full_id']}", disabled=True)
+                        if block.get("answer_text_raw"):
+                            st.markdown("**Answer Text (raw with line numbers):**")
+                            st.text_area("", block.get("answer_text_raw", ""), height=200, key=f"raw_a_{block['block_id']}", disabled=True)
 
 
 # =============================================================================
@@ -1612,18 +1615,34 @@ def render_format_step():
             st.rerun()
 
     st.markdown("""
-    This step takes the raw Q&A pairs and formats them into structured data using parallel LLM calls.
-    Each Q&A pair is processed individually, extracting choices, correct answer, and explanation.
+    This step takes the raw Q&A blocks and formats them into structured data using parallel LLM calls.
+    Each block is processed individually, extracting context, sub-questions, choices, correct answers, and explanations.
     """)
 
-    # Ensure raw_questions is loaded from file if session state is empty
+    # Load raw_blocks (new v2 format)
+    raw_blocks_file = get_raw_blocks_file()
+    if not st.session_state.raw_blocks and os.path.exists(raw_blocks_file):
+        with open(raw_blocks_file, "r") as f:
+            st.session_state.raw_blocks = json.load(f)
+
+    # Also load raw_questions (legacy format) if available
     raw_questions_file = get_raw_questions_file()
     if not st.session_state.raw_questions and os.path.exists(raw_questions_file):
         with open(raw_questions_file, "r") as f:
             st.session_state.raw_questions = json.load(f)
 
+    raw_blocks = st.session_state.get("raw_blocks", {})
     raw_questions = st.session_state.get("raw_questions", {})
-    if not raw_questions:
+
+    # Check if we have the new v2 format (blocks with question_text_raw)
+    has_v2_blocks = False
+    if raw_blocks:
+        # Check first block to see if it has v2 format
+        first_ch = next(iter(raw_blocks.values()), [])
+        if first_ch and isinstance(first_ch, list) and len(first_ch) > 0:
+            has_v2_blocks = "question_text_raw" in first_ch[0]
+
+    if not raw_blocks and not raw_questions:
         st.warning("Please extract raw questions first (Step 3)")
         return
 
@@ -1636,10 +1655,17 @@ def render_format_step():
     output_dir = get_output_dir()
     logger = get_extraction_logger(output_dir)
 
-    total_raw = sum(len(qs) for qs in raw_questions.values())
+    total_blocks = sum(len(bs) for bs in raw_blocks.values()) if raw_blocks else 0
+    total_raw = sum(len(qs) for qs in raw_questions.values()) if raw_questions else 0
     total_formatted = sum(len(qs) for qs in st.session_state.questions.values())
 
-    st.info(f"Raw Q&A pairs: {total_raw} | Formatted: {total_formatted}")
+    if has_v2_blocks:
+        st.success(f"**New block format detected (v2):** {total_blocks} raw blocks with line numbers preserved")
+        st.info(f"Formatted questions: {total_formatted}")
+    elif total_blocks > 0:
+        st.info(f"Raw Q&A pairs: {total_raw} (from {total_blocks} blocks) | Formatted: {total_formatted}")
+    else:
+        st.info(f"Raw Q&A pairs: {total_raw} | Formatted: {total_formatted}")
 
     # Chapter selector
     if not st.session_state.chapters:
@@ -1657,9 +1683,11 @@ def render_format_step():
     selected_ch_num = selected_ch["chapter_number"]
     selected_ch_key = f"ch{selected_ch_num}"
 
-    # Count raw questions for selected chapter
+    # Count blocks/questions for selected chapter
+    ch_raw_blocks = raw_blocks.get(selected_ch_key, [])
     ch_raw_questions = raw_questions.get(selected_ch_key, [])
-    ch_raw_count = len(ch_raw_questions)
+    ch_block_count = len(ch_raw_blocks)
+    ch_raw_count = len(ch_raw_questions) if ch_raw_questions else ch_block_count
 
     # Model selection and parallel workers
     model_col, workers_col, btn_col1, btn_col2 = st.columns([2, 1.5, 2, 2])
@@ -1685,7 +1713,123 @@ def render_format_step():
     # Capture model_id before threads start (session state not accessible in worker threads)
     model_id = get_selected_model_id()
 
-    # Helper function to format a single question
+    # Helper function to format a single block (v2 format)
+    def format_single_block(item):
+        """Format a raw block using format_raw_block_llm and convert to questions."""
+        import re
+        ch_key, block = item
+        ch_num = block["chapter"]
+        block_id = block.get("block_label", block.get("block_id", "?"))
+
+        # Strip line number markers before formatting (they were for traceability during extraction)
+        question_text = block.get("question_text_raw", "")
+        answer_text = block.get("answer_text_raw", "")
+
+        # Remove [LINE:NNNN] markers
+        question_text = re.sub(r'\[LINE:\d+\]\s*', '', question_text)
+        answer_text = re.sub(r'\[LINE:\d+\]\s*', '', answer_text)
+
+        # Call the format_raw_block_llm function with cleaned text
+        formatted_block = format_raw_block_llm(
+            client,
+            block_id,
+            question_text,
+            answer_text,
+            model_id,
+            ch_num
+        )
+
+        # Convert formatted block to raw_questions format
+        questions = []
+
+        context = formatted_block.get("context", {})
+        context_text = context.get("text", "")
+        context_images = context.get("image_files", [])
+
+        # Get shared discussion
+        shared = formatted_block.get("shared_discussion", {})
+        shared_text = shared.get("full_text", "")
+        if not shared_text:
+            # Build from components
+            parts = []
+            if shared.get("imaging_findings"):
+                parts.append(f"**Imaging Findings:** {shared['imaging_findings']}")
+            if shared.get("discussion"):
+                parts.append(f"**Discussion:** {shared['discussion']}")
+            if shared.get("differential_diagnosis"):
+                parts.append(f"**Differential Diagnosis:** {shared['differential_diagnosis']}")
+            if shared.get("references"):
+                parts.append("**References:**\n" + "\n".join(f"- {r}" for r in shared["references"]))
+            shared_text = "\n\n".join(parts)
+
+        # Process sub-questions
+        sub_questions = formatted_block.get("sub_questions", [])
+
+        # If there's context but no sub-questions, it's context-only
+        if context_text and not sub_questions:
+            questions.append({
+                "full_id": f"ch{ch_num}_{block_id}",
+                "local_id": block_id,
+                "chapter": ch_num,
+                "question_start": block.get("question_start", 0),
+                "question_end": block.get("question_end", 0),
+                "answer_start": block.get("answer_start", 0),
+                "answer_end": block.get("answer_end", 0),
+                "correct_letter": "",
+                "image_files": context_images,
+                "question_text": context_text,
+                "answer_text": "",
+                "is_context_only": True,
+                "block_id": block.get("block_id", f"ch{ch_num}_block_{block_id}")
+            })
+
+        # Add sub-questions
+        for sq in sub_questions:
+            local_id = sq.get("local_id", "?")
+            full_id = f"ch{ch_num}_{local_id}"
+
+            # Combine context with question text for sub-questions
+            q_text = sq.get("question_text", "")
+            if context_text and local_id != block_id:
+                q_text = context_text + "\n\n" + q_text
+
+            # Build explanation
+            explanation = sq.get("explanation", "")
+            if shared_text and not explanation.strip():
+                explanation = shared_text
+            elif shared_text:
+                explanation = explanation + "\n\n" + shared_text
+
+            # Combine question-specific images with context images
+            # Context images apply to ALL sub-questions in the block
+            all_images = list(sq.get("image_files", []))
+            for img in context_images:
+                if img not in all_images:
+                    all_images.append(img)
+
+            questions.append({
+                "full_id": full_id,
+                "local_id": local_id,
+                "chapter": ch_num,
+                "question_start": block.get("question_start", 0),
+                "question_end": block.get("question_end", 0),
+                "answer_start": block.get("answer_start", 0),
+                "answer_end": block.get("answer_end", 0),
+                "correct_letter": sq.get("correct_answer", ""),
+                "image_files": all_images,
+                "question_text": q_text,
+                "answer_text": explanation,
+                "is_context_only": False,
+                "block_id": block.get("block_id", f"ch{ch_num}_block_{block_id}"),
+                "choices": sq.get("choices", {}),
+                "text": q_text,  # For compatibility
+                "correct_answer": sq.get("correct_answer", ""),
+                "explanation": explanation
+            })
+
+        return ch_key, questions, formatted_block
+
+    # Helper function to format a single question (legacy)
     def format_single(item):
         ch_key, rq = item
         ch_num = rq["chapter"]
@@ -1701,62 +1845,120 @@ def render_format_step():
         formatted["full_id"] = rq["full_id"]
         formatted["local_id"] = rq["local_id"]
         formatted["image_files"] = rq["image_files"]
+        # Preserve block_id if present (from block extraction)
+        if rq.get("block_id"):
+            formatted["block_id"] = rq["block_id"]
+        # Preserve is_context_only flag if present
+        if rq.get("is_context_only"):
+            formatted["is_context_only"] = rq["is_context_only"]
         # Use correct_letter from extraction if LLM didn't find it
         if not formatted.get("correct_answer") and rq.get("correct_letter"):
             formatted["correct_answer"] = rq["correct_letter"]
         return ch_key, formatted
 
     with btn_col1:
-        format_chapter = st.button(
-            f"Format Chapter {selected_ch_num} ({ch_raw_count})",
-            type="primary",
-            key="format_chapter_btn",
-            disabled=ch_raw_count == 0
-        )
+        if has_v2_blocks:
+            format_chapter = st.button(
+                f"Format Chapter {selected_ch_num} ({ch_block_count} blocks)",
+                type="primary",
+                key="format_chapter_btn",
+                disabled=ch_block_count == 0
+            )
+        else:
+            format_chapter = st.button(
+                f"Format Chapter {selected_ch_num} ({ch_raw_count})",
+                type="primary",
+                key="format_chapter_btn",
+                disabled=ch_raw_count == 0
+            )
 
     with btn_col2:
-        format_all = st.button("Format ALL Questions", type="secondary", key="format_all_btn")
+        format_all = st.button("Format ALL", type="secondary", key="format_all_btn")
 
     # Single chapter formatting logic
     if format_chapter:
-        if ch_raw_count == 0:
+        if has_v2_blocks and ch_block_count == 0:
+            st.warning(f"No raw blocks in Chapter {selected_ch_num}")
+        elif not has_v2_blocks and ch_raw_count == 0:
             st.warning(f"No raw questions in Chapter {selected_ch_num}")
         else:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            # Collect raw questions for this chapter
-            ch_raw = [(selected_ch_key, rq) for rq in ch_raw_questions]
-            total = len(ch_raw)
-            status_text.text(f"Formatting {total} Q&A pairs from Chapter {selected_ch_num}...")
+            if has_v2_blocks:
+                # V2 Block-based formatting
+                ch_blocks = [(selected_ch_key, block) for block in ch_raw_blocks]
+                total = len(ch_blocks)
+                status_text.text(f"Formatting {total} blocks from Chapter {selected_ch_num}...")
 
-            formatted_list = []
-            completed = 0
+                formatted_list = []
+                raw_questions_list = []
+                completed = 0
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(format_single, item): item for item in ch_raw}
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {executor.submit(format_single_block, item): item for item in ch_blocks}
 
-                for future in as_completed(futures):
-                    try:
-                        ch_key, formatted = future.result()
-                        formatted_list.append(formatted)
-                    except Exception as e:
-                        ch_key, rq = futures[future]
-                        logger.error(f"Error formatting {rq['full_id']}: {e}")
-                        formatted_list.append({
-                            "full_id": rq["full_id"],
-                            "local_id": rq["local_id"],
-                            "text": rq["question_text"],
-                            "choices": {},
-                            "correct_answer": rq.get("correct_letter", ""),
-                            "explanation": rq["answer_text"],
-                            "image_files": rq["image_files"],
-                            "error": str(e)
-                        })
+                    for future in as_completed(futures):
+                        try:
+                            ch_key, questions, _ = future.result()
+                            formatted_list.extend(questions)
+                            raw_questions_list.extend(questions)
+                        except Exception as e:
+                            ch_key, block = futures[future]
+                            logger.error(f"Error formatting block {block.get('block_id', '?')}: {e}")
+                            # Add placeholder
+                            formatted_list.append({
+                                "full_id": block.get("block_id", "?"),
+                                "local_id": block.get("block_label", "?"),
+                                "text": block.get("question_text_raw", ""),
+                                "choices": {},
+                                "correct_answer": "",
+                                "explanation": block.get("answer_text_raw", ""),
+                                "image_files": [],
+                                "error": str(e)
+                            })
 
-                    completed += 1
-                    progress_bar.progress(completed / total)
-                    status_text.text(f"Chapter {selected_ch_num}: {completed}/{total} formatted...")
+                        completed += 1
+                        progress_bar.progress(completed / total)
+                        status_text.text(f"Chapter {selected_ch_num}: {completed}/{total} blocks formatted...")
+
+                # Also update raw_questions for compatibility
+                st.session_state.raw_questions[selected_ch_key] = raw_questions_list
+                save_raw_questions()
+
+            else:
+                # Legacy question-based formatting
+                ch_raw = [(selected_ch_key, rq) for rq in ch_raw_questions]
+                total = len(ch_raw)
+                status_text.text(f"Formatting {total} Q&A pairs from Chapter {selected_ch_num}...")
+
+                formatted_list = []
+                completed = 0
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {executor.submit(format_single, item): item for item in ch_raw}
+
+                    for future in as_completed(futures):
+                        try:
+                            ch_key, formatted = future.result()
+                            formatted_list.append(formatted)
+                        except Exception as e:
+                            ch_key, rq = futures[future]
+                            logger.error(f"Error formatting {rq['full_id']}: {e}")
+                            formatted_list.append({
+                                "full_id": rq["full_id"],
+                                "local_id": rq["local_id"],
+                                "text": rq["question_text"],
+                                "choices": {},
+                                "correct_answer": rq.get("correct_letter", ""),
+                                "explanation": rq["answer_text"],
+                                "image_files": rq["image_files"],
+                                "error": str(e)
+                            })
+
+                        completed += 1
+                        progress_bar.progress(completed / total)
+                        status_text.text(f"Chapter {selected_ch_num}: {completed}/{total} formatted...")
 
             # Sort and save
             formatted_list.sort(key=lambda q: question_sort_key(q["full_id"]))
@@ -1770,7 +1972,7 @@ def render_format_step():
             save_image_assignments()
 
             status_text.text("Done!")
-            st.success(f"Formatted {total} Q&A pairs from Chapter {selected_ch_num}")
+            st.success(f"Formatted {total} {'blocks' if has_v2_blocks else 'Q&A pairs'} from Chapter {selected_ch_num}")
             play_completion_sound()
             st.rerun()
 
@@ -1779,53 +1981,106 @@ def render_format_step():
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        # Collect all raw questions
-        all_raw = []
-        for ch_key, ch_raw in raw_questions.items():
-            for rq in ch_raw:
-                all_raw.append((ch_key, rq))
+        if has_v2_blocks:
+            # V2 Block-based formatting for all chapters
+            all_blocks = []
+            for ch_key, ch_blocks in raw_blocks.items():
+                for block in ch_blocks:
+                    all_blocks.append((ch_key, block))
 
-        total = len(all_raw)
-        status_text.text(f"Formatting {total} Q&A pairs with {max_workers} parallel workers...")
+            total = len(all_blocks)
+            status_text.text(f"Formatting {total} blocks with {max_workers} parallel workers...")
 
-        # Format in parallel
-        formatted_by_chapter = {}
-        completed = 0
+            formatted_by_chapter = {}
+            raw_questions_by_chapter = {}
+            completed = 0
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(format_single, item): item for item in all_raw}
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(format_single_block, item): item for item in all_blocks}
 
-            for future in as_completed(futures):
-                try:
-                    ch_key, formatted = future.result()
-                    if ch_key not in formatted_by_chapter:
-                        formatted_by_chapter[ch_key] = []
-                    formatted_by_chapter[ch_key].append(formatted)
-                except Exception as e:
-                    ch_key, rq = futures[future]
-                    logger.error(f"Error formatting {rq['full_id']}: {e}")
-                    # Add placeholder
-                    if ch_key not in formatted_by_chapter:
-                        formatted_by_chapter[ch_key] = []
-                    formatted_by_chapter[ch_key].append({
-                        "full_id": rq["full_id"],
-                        "local_id": rq["local_id"],
-                        "text": rq["question_text"],
-                        "choices": {},
-                        "correct_answer": rq.get("correct_letter", ""),
-                        "explanation": rq["answer_text"],
-                        "image_files": rq["image_files"],
-                        "error": str(e)
-                    })
+                for future in as_completed(futures):
+                    try:
+                        ch_key, questions, _ = future.result()
+                        if ch_key not in formatted_by_chapter:
+                            formatted_by_chapter[ch_key] = []
+                            raw_questions_by_chapter[ch_key] = []
+                        formatted_by_chapter[ch_key].extend(questions)
+                        raw_questions_by_chapter[ch_key].extend(questions)
+                    except Exception as e:
+                        ch_key, block = futures[future]
+                        logger.error(f"Error formatting block {block.get('block_id', '?')}: {e}")
+                        if ch_key not in formatted_by_chapter:
+                            formatted_by_chapter[ch_key] = []
+                        formatted_by_chapter[ch_key].append({
+                            "full_id": block.get("block_id", "?"),
+                            "local_id": block.get("block_label", "?"),
+                            "text": block.get("question_text_raw", ""),
+                            "choices": {},
+                            "correct_answer": "",
+                            "explanation": block.get("answer_text_raw", ""),
+                            "image_files": [],
+                            "error": str(e)
+                        })
 
-                completed += 1
-                progress_bar.progress(completed / total)
-                status_text.text(f"Formatted {completed}/{total} Q&A pairs...")
+                    completed += 1
+                    progress_bar.progress(completed / total)
+                    status_text.text(f"Formatted {completed}/{total} blocks...")
 
-                # Save incrementally every 10 questions
-                if completed % 10 == 0:
-                    st.session_state.questions = formatted_by_chapter
-                    save_questions()
+                    # Save incrementally every 5 blocks
+                    if completed % 5 == 0:
+                        st.session_state.questions = formatted_by_chapter
+                        save_questions()
+
+            # Also update raw_questions for compatibility
+            st.session_state.raw_questions = raw_questions_by_chapter
+            save_raw_questions()
+
+        else:
+            # Legacy question-based formatting
+            all_raw = []
+            for ch_key, ch_raw in raw_questions.items():
+                for rq in ch_raw:
+                    all_raw.append((ch_key, rq))
+
+            total = len(all_raw)
+            status_text.text(f"Formatting {total} Q&A pairs with {max_workers} parallel workers...")
+
+            formatted_by_chapter = {}
+            completed = 0
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(format_single, item): item for item in all_raw}
+
+                for future in as_completed(futures):
+                    try:
+                        ch_key, formatted = future.result()
+                        if ch_key not in formatted_by_chapter:
+                            formatted_by_chapter[ch_key] = []
+                        formatted_by_chapter[ch_key].append(formatted)
+                    except Exception as e:
+                        ch_key, rq = futures[future]
+                        logger.error(f"Error formatting {rq['full_id']}: {e}")
+                        if ch_key not in formatted_by_chapter:
+                            formatted_by_chapter[ch_key] = []
+                        formatted_by_chapter[ch_key].append({
+                            "full_id": rq["full_id"],
+                            "local_id": rq["local_id"],
+                            "text": rq["question_text"],
+                            "choices": {},
+                            "correct_answer": rq.get("correct_letter", ""),
+                            "explanation": rq["answer_text"],
+                            "image_files": rq["image_files"],
+                            "error": str(e)
+                        })
+
+                    completed += 1
+                    progress_bar.progress(completed / total)
+                    status_text.text(f"Formatted {completed}/{total} Q&A pairs...")
+
+                    # Save incrementally every 10 questions
+                    if completed % 10 == 0:
+                        st.session_state.questions = formatted_by_chapter
+                        save_questions()
 
         # Sort questions within each chapter
         for ch_key in formatted_by_chapter:
@@ -1841,8 +2096,14 @@ def render_format_step():
                     st.session_state.image_assignments[img_file] = q["full_id"]
         save_image_assignments()
 
+        # If raw_blocks exist, save them as question_blocks (ready for block-based generation)
+        if raw_blocks:
+            st.session_state.question_blocks = raw_blocks
+            save_question_blocks()
+            logger.info(f"Saved {sum(len(bs) for bs in raw_blocks.values())} blocks to question_blocks.json")
+
         status_text.text("Done!")
-        st.success(f"Formatted {total} Q&A pairs")
+        st.success(f"Formatted {total} {'blocks' if has_v2_blocks else 'Q&A pairs'}")
         play_completion_sound()
         st.info("**Next:** Go to **Step 5: Associate Context** to link context questions to sub-questions.")
         st.rerun()
@@ -1912,15 +2173,31 @@ def render_context_step():
         st.warning("Please format questions first (Step 4)")
         return
 
-    st.markdown("""
-    This step identifies **context-only questions** (clinical scenarios without answer choices)
-    and associates their text and images with the related sub-questions.
+    # Check if block data is available
+    question_blocks = st.session_state.get("question_blocks", {})
+    has_blocks = bool(question_blocks) and any(question_blocks.values())
 
-    **Example:**
-    - Q1 contains a clinical scenario and image (no answer choices)
-    - Q1a, Q1b, Q1c are the actual questions with choices
-    - After association, Q1's text is prepended to Q1a/Q1b/Q1c and images are linked
-    """)
+    if has_blocks:
+        total_blocks = sum(len(bs) for bs in question_blocks.values())
+        total_sub_q = sum(sum(len(b.get("sub_questions", [])) for b in bs) for bs in question_blocks.values())
+        st.success(f"Block data available: {total_blocks} blocks with {total_sub_q} sub-questions. "
+                   "Context has already been captured at block level during extraction.")
+        st.markdown("""
+        **Block Extraction Advantage:**
+        - Context text is already associated with each sub-question
+        - Shared discussion/answer text is captured for all sub-questions in the block
+        - No additional LLM call needed for context association
+        """)
+    else:
+        st.markdown("""
+        This step identifies **context-only questions** (clinical scenarios without answer choices)
+        and associates their text and images with the related sub-questions.
+
+        **Example:**
+        - Q1 contains a clinical scenario and image (no answer choices)
+        - Q1a, Q1b, Q1c are the actual questions with choices
+        - After association, Q1's text is prepended to Q1a/Q1b/Q1c and images are linked
+        """)
 
     # Count questions and pre-extracted context
     context_only_count = 0
@@ -2704,6 +2981,45 @@ def render_qc_step():
 
                     st.markdown(f"**Explanation:** {q.get('explanation', 'N/A')}")
 
+                # Block context panel - show if question belongs to a block
+                question_blocks = st.session_state.get("question_blocks", {})
+                block_id = q.get("block_id")
+                if block_id and question_blocks:
+                    # Find the source block
+                    source_block = None
+                    for ch_blk_key, ch_blocks in question_blocks.items():
+                        for block in ch_blocks:
+                            if block.get("block_id") == block_id or block.get("block_label") == block_id:
+                                source_block = block
+                                break
+                        if source_block:
+                            break
+
+                    if source_block:
+                        with st.expander("View Full Block Context", expanded=False):
+                            st.markdown(f"**Block ID:** `{block_id}`")
+
+                            # Show block context (clinical scenario)
+                            if source_block.get("context_text"):
+                                st.markdown("**Context (Clinical Scenario):**")
+                                st.text_area("", source_block["context_text"], height=100, disabled=True, key=f"qc_block_ctx_{q_id}")
+
+                            # Show all sub-questions in this block
+                            sub_questions = source_block.get("sub_questions", [])
+                            if len(sub_questions) > 1:
+                                st.markdown(f"**Other questions in this block ({len(sub_questions)} total):**")
+                                for sq in sub_questions:
+                                    sq_local = sq.get("local_id", "")
+                                    sq_text = sq.get("question_text", "")[:80]
+                                    if sq_local != q.get("local_id"):
+                                        st.markdown(f"- Q{sq_local}: {sq_text}...")
+
+                            # Show shared answer/discussion
+                            shared_answer = source_block.get("shared_answer_text", "")
+                            if shared_answer:
+                                st.markdown("**Shared Discussion (applies to all sub-questions):**")
+                                st.text_area("", shared_answer, height=200, disabled=True, key=f"qc_block_shared_{q_id}")
+
             with right_col:
                 assigned_images = get_images_for_question(q_id)
 
@@ -3153,8 +3469,21 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             # Get correct answer
             correct = q.get('correct_answer', '')
 
-            # Get explanation
+            # Get explanation - include shared discussion from block if available
             explanation = q.get('explanation', '')
+
+            # If question has a block_id, try to append shared discussion
+            block_id = q.get('block_id')
+            if block_id:
+                question_blocks = st.session_state.get("question_blocks", {})
+                if question_blocks:
+                    for ch_key_b, ch_blocks in question_blocks.items():
+                        for block in ch_blocks:
+                            if block.get("block_id") == block_id or block.get("block_label") == block_id:
+                                shared_answer = block.get('shared_answer_text', '')
+                                if shared_answer and shared_answer not in explanation:
+                                    explanation = explanation + "\n\n<b>Shared Discussion:</b>\n" + shared_answer
+                                break
 
             # Handle image
             image_html = ''
@@ -3213,13 +3542,25 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
 
         if generated_cards:
             # generated_cards is keyed by chapter (e.g., "ch4"), each value is a list of cards
-            # Each card has source_question_id (e.g., "ch4_2a") for the source question
+            # Cards can have either:
+            #   - source_question_id (legacy) - e.g., "ch4_2a"
+            #   - source_block_id + source_sub_question_id (block-based)
 
             # Build question lookup to get source explanations
             question_lookup = {}
             for ch_key_q, ch_qs in questions.items():
                 for q in ch_qs:
                     question_lookup[q['full_id']] = q
+
+            # Build block lookup if question_blocks are available
+            block_lookup = {}
+            question_blocks = st.session_state.get("question_blocks", {})
+            if question_blocks:
+                for ch_key_b, ch_blocks in question_blocks.items():
+                    for block in ch_blocks:
+                        block_id = block.get("block_id", block.get("block_label", ""))
+                        if block_id:
+                            block_lookup[block_id] = block
 
             # Create a generated sub-deck for each chapter
             for ch in chapters:
@@ -3246,28 +3587,59 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                     if not cloze_text:
                         continue
 
-                    # Get source question ID from card data
+                    # Determine if block-based or question-based card
+                    source_block_id = card.get('source_block_id', '')
+                    source_sub_q_id = card.get('source_sub_question_id', '')
                     source_q_id = card.get('source_question_id', '')
-                    local_id = source_q_id.split('_')[-1] if '_' in source_q_id else source_q_id
 
-                    # Look up source question to get explanation
-                    source_q = question_lookup.get(source_q_id, {})
-                    source_explanation = source_q.get('explanation', '')
-
-                    # Extra info: learning point, category, confidence, and source explanation
+                    # Build source reference and extra info
                     extra_parts = []
-                    if card.get('learning_point'):
-                        extra_parts.append(f"<b>Learning point:</b> {card['learning_point']}")
-                    if card.get('category'):
-                        extra_parts.append(f"<b>Category:</b> {card['category']}")
-                    if card.get('confidence'):
-                        extra_parts.append(f"<b>Confidence:</b> {card['confidence']}")
-                    if source_explanation:
-                        extra_parts.append(f"<hr><b>Source:</b><br>{source_explanation}")
-                    extra = '<br>'.join(extra_parts)
+                    source_ref = ""
 
-                    # Source reference
-                    source_ref = f"Generated from Q{local_id}"
+                    if source_block_id:
+                        # Block-based card
+                        source_block = block_lookup.get(source_block_id, {})
+                        local_id = source_sub_q_id if source_sub_q_id else source_block_id
+
+                        if card.get('learning_point'):
+                            extra_parts.append(f"<b>Learning point:</b> {card['learning_point']}")
+                        if card.get('category'):
+                            extra_parts.append(f"<b>Category:</b> {card['category']}")
+                        if card.get('confidence'):
+                            extra_parts.append(f"<b>Confidence:</b> {card['confidence']}")
+
+                        # Include block context in extra
+                        if source_block:
+                            context_text = source_block.get('context_text', '')
+                            shared_answer = source_block.get('shared_answer_text', '')
+                            if context_text:
+                                extra_parts.append(f"<hr><b>Context:</b><br>{context_text[:500]}{'...' if len(context_text) > 500 else ''}")
+                            if shared_answer:
+                                extra_parts.append(f"<hr><b>Discussion:</b><br>{shared_answer}")
+
+                        source_ref = f"Generated from Block {source_block_id}"
+                        if source_sub_q_id:
+                            source_ref += f", Q{source_sub_q_id}"
+                    else:
+                        # Legacy question-based card
+                        local_id = source_q_id.split('_')[-1] if '_' in source_q_id else source_q_id
+
+                        # Look up source question to get explanation
+                        source_q = question_lookup.get(source_q_id, {})
+                        source_explanation = source_q.get('explanation', '')
+
+                        if card.get('learning_point'):
+                            extra_parts.append(f"<b>Learning point:</b> {card['learning_point']}")
+                        if card.get('category'):
+                            extra_parts.append(f"<b>Category:</b> {card['category']}")
+                        if card.get('confidence'):
+                            extra_parts.append(f"<b>Confidence:</b> {card['confidence']}")
+                        if source_explanation:
+                            extra_parts.append(f"<hr><b>Source:</b><br>{source_explanation}")
+
+                        source_ref = f"Generated from Q{local_id}"
+
+                    extra = '<br>'.join(extra_parts)
 
                     # Create cloze note
                     cloze_note = genanki.Note(
@@ -3301,7 +3673,7 @@ def render_generate_step():
     """Render the cloze card generation step."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from datetime import datetime
-    from llm_extraction import generate_cloze_cards_llm
+    from llm_extraction import generate_cloze_cards_llm, generate_cloze_cards_from_block_llm
     from state_management import save_generated_questions
 
     col1, col2 = st.columns([4, 1])
@@ -3314,10 +3686,28 @@ def render_generate_step():
             st.success("Generated cards cleared")
             st.rerun()
 
-    st.markdown("""
-    Generate cloze deletion flashcards from question explanations.
-    Each explanation is analyzed to extract key learning points that become additional Anki cards.
-    """)
+    # Check if block data is available
+    question_blocks = st.session_state.get("question_blocks", {})
+    has_blocks = bool(question_blocks) and any(question_blocks.values())
+
+    if has_blocks:
+        st.markdown("""
+        Generate cloze deletion flashcards from **question blocks**.
+        Each block includes shared context and discussion, providing full context for accurate card generation.
+        """)
+        # Block-based generation toggle
+        use_block_generation = st.checkbox(
+            "Use block-based generation (recommended)",
+            value=True,
+            help="Generate cards from entire blocks with full context. "
+                 "This prevents hallucination by providing the model with all related content."
+        )
+    else:
+        use_block_generation = False
+        st.markdown("""
+        Generate cloze deletion flashcards from question explanations.
+        Each explanation is analyzed to extract key learning points that become additional Anki cards.
+        """)
 
     # Check prerequisites - need either questions_merged or questions
     questions_source = st.session_state.questions_merged or st.session_state.questions
@@ -3330,7 +3720,22 @@ def render_generate_step():
         st.error("ANTHROPIC_API_KEY not set. Please set your API key in environment variables.")
         return
 
-    # Count questions with explanations (skip context-only)
+    # Gather blocks for block-based generation
+    all_blocks = []
+    if use_block_generation and question_blocks:
+        for ch_key in sort_chapter_keys(question_blocks.keys()):
+            ch_blocks = question_blocks[ch_key]
+            ch_num = int(ch_key[2:]) if ch_key.startswith("ch") else 0
+            for block in ch_blocks:
+                # Check if block has content worth generating from
+                has_content = (
+                    block.get("shared_answer_text") or
+                    any(sq.get("specific_answer_text") for sq in block.get("sub_questions", []))
+                )
+                if has_content:
+                    all_blocks.append((ch_key, ch_num, block))
+
+    # Count questions with explanations (skip context-only) for legacy mode
     all_questions = []
     for ch_key in sort_chapter_keys(questions_source.keys()):
         ch_questions = questions_source[ch_key]
@@ -3341,18 +3746,28 @@ def render_generate_step():
                 all_questions.append((ch_key, ch_num, q))
 
     total_with_explanations = len(all_questions)
+    total_blocks_to_process = len(all_blocks)
     generated_cards = st.session_state.generated_questions.get("generated_cards", {})
     total_generated = sum(len(cards) for cards in generated_cards.values())
 
     # Stats row
     col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Questions with Explanations", total_with_explanations)
-    with col2:
-        st.metric("Generated Cards", total_generated)
-    with col3:
-        avg = total_generated / total_with_explanations if total_with_explanations > 0 else 0
-        st.metric("Avg Cards/Question", f"{avg:.1f}")
+    if use_block_generation:
+        with col1:
+            st.metric("Blocks to Process", total_blocks_to_process)
+        with col2:
+            st.metric("Generated Cards", total_generated)
+        with col3:
+            avg = total_generated / total_blocks_to_process if total_blocks_to_process > 0 else 0
+            st.metric("Avg Cards/Block", f"{avg:.1f}")
+    else:
+        with col1:
+            st.metric("Questions with Explanations", total_with_explanations)
+        with col2:
+            st.metric("Generated Cards", total_generated)
+        with col3:
+            avg = total_generated / total_with_explanations if total_with_explanations > 0 else 0
+            st.metric("Avg Cards/Question", f"{avg:.1f}")
 
     st.markdown("---")
 
@@ -3372,12 +3787,19 @@ def render_generate_step():
     selected_ch_num = selected_ch["chapter_number"]
     selected_ch_key = f"ch{selected_ch_num}"
 
-    # Count questions with explanations for selected chapter
+    # Count questions with explanations for selected chapter (legacy mode)
     ch_questions_with_explanations = [
         (ch_key, ch_num, q) for ch_key, ch_num, q in all_questions
         if ch_key == selected_ch_key
     ]
     ch_question_count = len(ch_questions_with_explanations)
+
+    # Count blocks for selected chapter (block mode)
+    ch_blocks_to_process = [
+        (ch_key, ch_num, block) for ch_key, ch_num, block in all_blocks
+        if ch_key == selected_ch_key
+    ]
+    ch_block_count = len(ch_blocks_to_process)
 
     # Generation controls
     model_col, workers_col, btn_col1, btn_col2 = st.columns([2, 1.5, 2, 2])
@@ -3399,169 +3821,311 @@ def render_generate_step():
         )
 
     with btn_col1:
-        generate_chapter = st.button(
-            f"Generate Chapter {selected_ch_num} ({ch_question_count})",
-            type="primary",
-            key="gen_chapter_btn",
-            disabled=ch_question_count == 0
-        )
+        if use_block_generation:
+            generate_chapter = st.button(
+                f"Generate Chapter {selected_ch_num} ({ch_block_count} blocks)",
+                type="primary",
+                key="gen_chapter_btn",
+                disabled=ch_block_count == 0
+            )
+        else:
+            generate_chapter = st.button(
+                f"Generate Chapter {selected_ch_num} ({ch_question_count})",
+                type="primary",
+                key="gen_chapter_btn",
+                disabled=ch_question_count == 0
+            )
 
     with btn_col2:
-        generate_all = st.button("Generate ALL Cards", type="secondary", key="gen_all_btn")
+        if use_block_generation:
+            generate_all = st.button(
+                f"Generate ALL ({total_blocks_to_process} blocks)",
+                type="secondary",
+                key="gen_all_btn"
+            )
+        else:
+            generate_all = st.button("Generate ALL Cards", type="secondary", key="gen_all_btn")
 
     # Single chapter generation logic
     if generate_chapter:
-        if ch_question_count == 0:
-            st.warning(f"No questions with explanations in Chapter {selected_ch_num}")
+        model_id = get_selected_model_id()
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        # Initialize generated_questions structure
+        if not st.session_state.generated_questions.get("metadata"):
+            st.session_state.generated_questions["metadata"] = {
+                "created_at": datetime.now().isoformat(),
+                "model_used": model_id,
+                "total_generated": 0,
+                "source_questions_processed": 0,
+                "source_blocks_processed": 0
+            }
+        if "generated_cards" not in st.session_state.generated_questions:
+            st.session_state.generated_questions["generated_cards"] = {}
+
+        # Clear existing cards for this chapter
+        if selected_ch_key in st.session_state.generated_questions["generated_cards"]:
+            st.session_state.generated_questions["generated_cards"][selected_ch_key] = []
+
+        completed = 0
+        total_cards_generated = 0
+
+        if use_block_generation:
+            # Block-based generation
+            if ch_block_count == 0:
+                st.warning(f"No blocks to process in Chapter {selected_ch_num}")
+            else:
+                def process_block(item):
+                    ch_key, ch_num, block = item
+                    cards = generate_cloze_cards_from_block_llm(client, block, ch_num, model_id)
+                    return ch_key, block, cards
+
+                with ThreadPoolExecutor(max_workers=gen_workers) as executor:
+                    futures = {executor.submit(process_block, item): item for item in ch_blocks_to_process}
+
+                    for future in as_completed(futures):
+                        ch_key, block, cards = future.result()
+                        completed += 1
+
+                        if cards:
+                            # Initialize chapter list if needed
+                            if ch_key not in st.session_state.generated_questions["generated_cards"]:
+                                st.session_state.generated_questions["generated_cards"][ch_key] = []
+
+                            # Build card objects with block source info
+                            block_id = block.get("block_id", block.get("block_label", "unknown"))
+                            for i, card in enumerate(cards, 1):
+                                full_card = {
+                                    "generated_id": f"{ch_key}_{block_id}_gen_{i}",
+                                    "source_block_id": block_id,
+                                    "source_sub_question_id": card.get("source_sub_question_id", ""),
+                                    "cloze_text": card.get("cloze_text", ""),
+                                    "learning_point": card.get("learning_point", ""),
+                                    "confidence": card.get("confidence", "medium"),
+                                    "category": card.get("category", "")
+                                }
+                                st.session_state.generated_questions["generated_cards"][ch_key].append(full_card)
+                                total_cards_generated += 1
+
+                        # Update progress
+                        progress = completed / ch_block_count
+                        progress_bar.progress(progress)
+                        status_text.text(f"Chapter {selected_ch_num}: {completed}/{ch_block_count} blocks | {total_cards_generated} cards generated")
+
+                        # Save periodically (every 5 blocks)
+                        if completed % 5 == 0:
+                            st.session_state.generated_questions["metadata"]["total_generated"] = sum(
+                                len(cards) for cards in st.session_state.generated_questions["generated_cards"].values()
+                            )
+                            st.session_state.generated_questions["metadata"]["source_blocks_processed"] = completed
+                            save_generated_questions()
+
+                # Final save
+                st.session_state.generated_questions["metadata"]["total_generated"] = sum(
+                    len(cards) for cards in st.session_state.generated_questions["generated_cards"].values()
+                )
+                st.session_state.generated_questions["metadata"]["source_blocks_processed"] = completed
+                save_generated_questions()
+
+                progress_bar.progress(1.0)
+                status_text.text(f"Complete: {completed} blocks processed, {total_cards_generated} cards generated")
+                st.success(f"Generated {total_cards_generated} cloze cards from {completed} blocks in Chapter {selected_ch_num}!")
+                st.rerun()
         else:
-            model_id = get_selected_model_id()
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            # Legacy question-based generation
+            if ch_question_count == 0:
+                st.warning(f"No questions with explanations in Chapter {selected_ch_num}")
+            else:
+                def process_question(item):
+                    ch_key, ch_num, q = item
+                    cards = generate_cloze_cards_llm(client, q, ch_num, model_id)
+                    return ch_key, q, cards
 
-            # Initialize generated_questions structure
-            if not st.session_state.generated_questions.get("metadata"):
-                st.session_state.generated_questions["metadata"] = {
-                    "created_at": datetime.now().isoformat(),
-                    "model_used": model_id,
-                    "total_generated": 0,
-                    "source_questions_processed": 0
-                }
-            if "generated_cards" not in st.session_state.generated_questions:
-                st.session_state.generated_questions["generated_cards"] = {}
+                with ThreadPoolExecutor(max_workers=gen_workers) as executor:
+                    futures = {executor.submit(process_question, item): item for item in ch_questions_with_explanations}
 
-            # Clear existing cards for this chapter
-            if selected_ch_key in st.session_state.generated_questions["generated_cards"]:
-                st.session_state.generated_questions["generated_cards"][selected_ch_key] = []
+                    for future in as_completed(futures):
+                        ch_key, q, cards = future.result()
+                        completed += 1
 
-            completed = 0
-            total_cards_generated = 0
+                        if cards:
+                            # Initialize chapter list if needed
+                            if ch_key not in st.session_state.generated_questions["generated_cards"]:
+                                st.session_state.generated_questions["generated_cards"][ch_key] = []
 
-            def process_question(item):
-                ch_key, ch_num, q = item
-                cards = generate_cloze_cards_llm(client, q, ch_num, model_id)
-                return ch_key, q, cards
+                            # Build card objects
+                            for i, card in enumerate(cards, 1):
+                                full_card = {
+                                    "generated_id": f"{q['full_id']}_gen_{i}",
+                                    "source_question_id": q["full_id"],
+                                    "cloze_text": card.get("cloze_text", ""),
+                                    "learning_point": card.get("learning_point", ""),
+                                    "confidence": card.get("confidence", "medium"),
+                                    "category": card.get("category", "")
+                                }
+                                st.session_state.generated_questions["generated_cards"][ch_key].append(full_card)
+                                total_cards_generated += 1
 
-            with ThreadPoolExecutor(max_workers=gen_workers) as executor:
-                futures = {executor.submit(process_question, item): item for item in ch_questions_with_explanations}
+                        # Update progress
+                        progress = completed / ch_question_count
+                        progress_bar.progress(progress)
+                        status_text.text(f"Chapter {selected_ch_num}: {completed}/{ch_question_count} questions | {total_cards_generated} cards generated")
 
-                for future in as_completed(futures):
-                    ch_key, q, cards = future.result()
-                    completed += 1
+                        # Save periodically (every 10 questions)
+                        if completed % 10 == 0:
+                            st.session_state.generated_questions["metadata"]["total_generated"] = sum(
+                                len(cards) for cards in st.session_state.generated_questions["generated_cards"].values()
+                            )
+                            save_generated_questions()
 
-                    if cards:
-                        # Initialize chapter list if needed
-                        if ch_key not in st.session_state.generated_questions["generated_cards"]:
-                            st.session_state.generated_questions["generated_cards"][ch_key] = []
+                # Final save
+                st.session_state.generated_questions["metadata"]["total_generated"] = sum(
+                    len(cards) for cards in st.session_state.generated_questions["generated_cards"].values()
+                )
+                save_generated_questions()
 
-                        # Build card objects
-                        for i, card in enumerate(cards, 1):
-                            full_card = {
-                                "generated_id": f"{q['full_id']}_gen_{i}",
-                                "source_question_id": q["full_id"],
-                                "cloze_text": card.get("cloze_text", ""),
-                                "learning_point": card.get("learning_point", ""),
-                                "confidence": card.get("confidence", "medium"),
-                                "category": card.get("category", "")
-                            }
-                            st.session_state.generated_questions["generated_cards"][ch_key].append(full_card)
-                            total_cards_generated += 1
-
-                    # Update progress
-                    progress = completed / ch_question_count
-                    progress_bar.progress(progress)
-                    status_text.text(f"Chapter {selected_ch_num}: {completed}/{ch_question_count} questions | {total_cards_generated} cards generated")
-
-                    # Save periodically (every 10 questions)
-                    if completed % 10 == 0:
-                        st.session_state.generated_questions["metadata"]["total_generated"] = sum(
-                            len(cards) for cards in st.session_state.generated_questions["generated_cards"].values()
-                        )
-                        save_generated_questions()
-
-            # Final save
-            st.session_state.generated_questions["metadata"]["total_generated"] = sum(
-                len(cards) for cards in st.session_state.generated_questions["generated_cards"].values()
-            )
-            save_generated_questions()
-
-            progress_bar.progress(1.0)
-            status_text.text(f"Complete: {completed} questions processed, {total_cards_generated} cards generated")
-            st.success(f"Generated {total_cards_generated} cloze cards from {completed} questions in Chapter {selected_ch_num}!")
-            st.rerun()
+                progress_bar.progress(1.0)
+                status_text.text(f"Complete: {completed} questions processed, {total_cards_generated} cards generated")
+                st.success(f"Generated {total_cards_generated} cloze cards from {completed} questions in Chapter {selected_ch_num}!")
+                st.rerun()
 
     # All chapters generation logic
     if generate_all:
-        if total_with_explanations == 0:
-            st.warning("No questions with explanations found to process")
+        model_id = get_selected_model_id()
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        # Initialize generated_questions structure
+        if not st.session_state.generated_questions.get("metadata"):
+            st.session_state.generated_questions["metadata"] = {
+                "created_at": datetime.now().isoformat(),
+                "model_used": model_id,
+                "total_generated": 0,
+                "source_questions_processed": 0,
+                "source_blocks_processed": 0
+            }
+        if "generated_cards" not in st.session_state.generated_questions:
+            st.session_state.generated_questions["generated_cards"] = {}
+
+        # Clear all existing cards
+        st.session_state.generated_questions["generated_cards"] = {}
+
+        completed = 0
+        total_cards_generated = 0
+
+        if use_block_generation:
+            # Block-based generation for all chapters
+            if total_blocks_to_process == 0:
+                st.warning("No blocks found to process")
+            else:
+                def process_block(item):
+                    ch_key, ch_num, block = item
+                    cards = generate_cloze_cards_from_block_llm(client, block, ch_num, model_id)
+                    return ch_key, block, cards
+
+                with ThreadPoolExecutor(max_workers=gen_workers) as executor:
+                    futures = {executor.submit(process_block, item): item for item in all_blocks}
+
+                    for future in as_completed(futures):
+                        ch_key, block, cards = future.result()
+                        completed += 1
+
+                        if cards:
+                            # Initialize chapter list if needed
+                            if ch_key not in st.session_state.generated_questions["generated_cards"]:
+                                st.session_state.generated_questions["generated_cards"][ch_key] = []
+
+                            # Build card objects with block source info
+                            block_id = block.get("block_id", block.get("block_label", "unknown"))
+                            for i, card in enumerate(cards, 1):
+                                full_card = {
+                                    "generated_id": f"{ch_key}_{block_id}_gen_{i}",
+                                    "source_block_id": block_id,
+                                    "source_sub_question_id": card.get("source_sub_question_id", ""),
+                                    "cloze_text": card.get("cloze_text", ""),
+                                    "learning_point": card.get("learning_point", ""),
+                                    "confidence": card.get("confidence", "medium"),
+                                    "category": card.get("category", "")
+                                }
+                                st.session_state.generated_questions["generated_cards"][ch_key].append(full_card)
+                                total_cards_generated += 1
+
+                        # Update progress
+                        progress = completed / total_blocks_to_process
+                        progress_bar.progress(progress)
+                        status_text.text(f"Processing: {completed}/{total_blocks_to_process} blocks | {total_cards_generated} cards generated")
+
+                        # Save periodically (every 5 blocks)
+                        if completed % 5 == 0:
+                            st.session_state.generated_questions["metadata"]["total_generated"] = total_cards_generated
+                            st.session_state.generated_questions["metadata"]["source_blocks_processed"] = completed
+                            save_generated_questions()
+
+                # Final save
+                st.session_state.generated_questions["metadata"]["total_generated"] = total_cards_generated
+                st.session_state.generated_questions["metadata"]["source_blocks_processed"] = completed
+                save_generated_questions()
+
+                progress_bar.progress(1.0)
+                status_text.text(f"Complete: {completed} blocks processed, {total_cards_generated} cards generated")
+                st.success(f"Generated {total_cards_generated} cloze cards from {completed} blocks!")
+                st.rerun()
         else:
-            model_id = get_selected_model_id()
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            # Legacy question-based generation
+            if total_with_explanations == 0:
+                st.warning("No questions with explanations found to process")
+            else:
+                def process_question(item):
+                    ch_key, ch_num, q = item
+                    cards = generate_cloze_cards_llm(client, q, ch_num, model_id)
+                    return ch_key, q, cards
 
-            # Initialize generated_questions structure
-            if not st.session_state.generated_questions.get("metadata"):
-                st.session_state.generated_questions["metadata"] = {
-                    "created_at": datetime.now().isoformat(),
-                    "model_used": model_id,
-                    "total_generated": 0,
-                    "source_questions_processed": 0
-                }
-            if "generated_cards" not in st.session_state.generated_questions:
-                st.session_state.generated_questions["generated_cards"] = {}
+                with ThreadPoolExecutor(max_workers=gen_workers) as executor:
+                    futures = {executor.submit(process_question, item): item for item in all_questions}
 
-            completed = 0
-            total_cards_generated = 0
+                    for future in as_completed(futures):
+                        ch_key, q, cards = future.result()
+                        completed += 1
 
-            def process_question(item):
-                ch_key, ch_num, q = item
-                cards = generate_cloze_cards_llm(client, q, ch_num, model_id)
-                return ch_key, q, cards
+                        if cards:
+                            # Initialize chapter list if needed
+                            if ch_key not in st.session_state.generated_questions["generated_cards"]:
+                                st.session_state.generated_questions["generated_cards"][ch_key] = []
 
-            with ThreadPoolExecutor(max_workers=gen_workers) as executor:
-                futures = {executor.submit(process_question, item): item for item in all_questions}
+                            # Build card objects
+                            for i, card in enumerate(cards, 1):
+                                full_card = {
+                                    "generated_id": f"{q['full_id']}_gen_{i}",
+                                    "source_question_id": q["full_id"],
+                                    "cloze_text": card.get("cloze_text", ""),
+                                    "learning_point": card.get("learning_point", ""),
+                                    "confidence": card.get("confidence", "medium"),
+                                    "category": card.get("category", "")
+                                }
+                                st.session_state.generated_questions["generated_cards"][ch_key].append(full_card)
+                                total_cards_generated += 1
 
-                for future in as_completed(futures):
-                    ch_key, q, cards = future.result()
-                    completed += 1
+                        # Update progress
+                        progress = completed / total_with_explanations
+                        progress_bar.progress(progress)
+                        status_text.text(f"Processing: {completed}/{total_with_explanations} questions | {total_cards_generated} cards generated")
 
-                    if cards:
-                        # Initialize chapter list if needed
-                        if ch_key not in st.session_state.generated_questions["generated_cards"]:
-                            st.session_state.generated_questions["generated_cards"][ch_key] = []
+                        # Save periodically (every 10 questions)
+                        if completed % 10 == 0:
+                            st.session_state.generated_questions["metadata"]["total_generated"] = total_cards_generated
+                            st.session_state.generated_questions["metadata"]["source_questions_processed"] = completed
+                            save_generated_questions()
 
-                        # Build card objects (source data is looked up from questions_merged)
-                        for i, card in enumerate(cards, 1):
-                            full_card = {
-                                "generated_id": f"{q['full_id']}_gen_{i}",
-                                "source_question_id": q["full_id"],
-                                "cloze_text": card.get("cloze_text", ""),
-                                "learning_point": card.get("learning_point", ""),
-                                "confidence": card.get("confidence", "medium"),
-                                "category": card.get("category", "")
-                            }
-                            st.session_state.generated_questions["generated_cards"][ch_key].append(full_card)
-                            total_cards_generated += 1
+                # Final save
+                st.session_state.generated_questions["metadata"]["total_generated"] = total_cards_generated
+                st.session_state.generated_questions["metadata"]["source_questions_processed"] = completed
+                save_generated_questions()
 
-                    # Update progress
-                    progress = completed / total_with_explanations
-                    progress_bar.progress(progress)
-                    status_text.text(f"Processing: {completed}/{total_with_explanations} questions | {total_cards_generated} cards generated")
-
-                    # Save periodically (every 10 questions)
-                    if completed % 10 == 0:
-                        st.session_state.generated_questions["metadata"]["total_generated"] = total_cards_generated
-                        st.session_state.generated_questions["metadata"]["source_questions_processed"] = completed
-                        save_generated_questions()
-
-            # Final save
-            st.session_state.generated_questions["metadata"]["total_generated"] = total_cards_generated
-            st.session_state.generated_questions["metadata"]["source_questions_processed"] = completed
-            save_generated_questions()
-
-            progress_bar.progress(1.0)
-            status_text.text(f"Complete: {completed} questions processed, {total_cards_generated} cards generated")
-            st.success(f"Generated {total_cards_generated} cloze cards from {completed} questions!")
-            st.rerun()
+                progress_bar.progress(1.0)
+                status_text.text(f"Complete: {completed} questions processed, {total_cards_generated} cards generated")
+                st.success(f"Generated {total_cards_generated} cloze cards from {completed} questions!")
+                st.rerun()
 
     # Preview section
     generated_cards = st.session_state.generated_questions.get("generated_cards", {})
@@ -3569,19 +4133,28 @@ def render_generate_step():
         st.markdown("---")
         st.subheader("Generated Cards Preview")
 
+        # Determine if using block-based cards
+        first_ch_cards = next(iter(generated_cards.values()), [])
+        is_block_based = first_ch_cards and "source_block_id" in first_ch_cards[0]
+
         # Filters
         col1, col2 = st.columns(2)
         with col1:
             ch_options = ["All Chapters"] + sort_chapter_keys(generated_cards.keys())
             ch_filter = st.selectbox("Filter by chapter:", ch_options, key="gen_ch_filter")
         with col2:
-            # Get unique source question IDs
+            # Get unique source IDs (block_id or question_id)
             source_ids = set()
             for ch_cards in generated_cards.values():
                 for card in ch_cards:
-                    source_ids.add(card["source_question_id"])
-            source_options = ["All Questions"] + sorted(source_ids, key=question_sort_key)
-            source_filter = st.selectbox("Filter by source:", source_options, key="gen_source_filter")
+                    if is_block_based:
+                        source_ids.add(card.get("source_block_id", ""))
+                    else:
+                        source_ids.add(card.get("source_question_id", ""))
+            filter_label = "Filter by block:" if is_block_based else "Filter by source:"
+            all_label = "All Blocks" if is_block_based else "All Questions"
+            source_options = [all_label] + sorted([s for s in source_ids if s], key=question_sort_key)
+            source_filter = st.selectbox(filter_label, source_options, key="gen_source_filter")
 
         # Collect filtered cards
         filtered_cards = []
@@ -3589,7 +4162,12 @@ def render_generate_step():
             if ch_filter != "All Chapters" and ch_key != ch_filter:
                 continue
             for card in generated_cards[ch_key]:
-                if source_filter != "All Questions" and card["source_question_id"] != source_filter:
+                if is_block_based:
+                    card_source = card.get("source_block_id", "")
+                else:
+                    card_source = card.get("source_question_id", "")
+                all_label = "All Blocks" if is_block_based else "All Questions"
+                if source_filter != all_label and card_source != source_filter:
                     continue
                 filtered_cards.append((ch_key, card))
 
@@ -3621,34 +4199,72 @@ def render_generate_step():
                     st.session_state.gen_preview_idx += 1
                     st.rerun()
 
-            # Look up source question from questions_merged
-            source_q_id = card["source_question_id"]
-            source_q = None
-            # Parse chapter from question ID (e.g., "ch1_12b" -> "ch1")
-            if "_" in source_q_id:
-                source_ch_key = source_q_id.split("_")[0]
-                ch_questions = questions_source.get(source_ch_key, [])
-                for q in ch_questions:
-                    if q.get("full_id") == source_q_id:
-                        source_q = q
-                        break
-
             # Side-by-side display
             left_col, right_col = st.columns(2)
 
             with left_col:
                 st.markdown("#### Source")
-                st.markdown(f"**Question ID:** `{source_q_id}`")
 
-                if source_q:
-                    # Show full explanation text as the source reference
-                    explanation = source_q.get("explanation", "")
-                    if explanation:
-                        st.text_area("Explanation (source):", explanation, height=300, disabled=True, key=f"src_exp_{current_idx}")
+                if is_block_based:
+                    # Block-based card - show block info and full context
+                    source_block_id = card.get("source_block_id", "")
+                    source_sub_q_id = card.get("source_sub_question_id", "")
+                    st.markdown(f"**Block:** `{source_block_id}`")
+                    if source_sub_q_id:
+                        st.markdown(f"**Sub-question:** `{source_sub_q_id}`")
+
+                    # Find the source block
+                    source_block = None
+                    for ch_key, ch_blocks in question_blocks.items():
+                        for block in ch_blocks:
+                            if block.get("block_id") == source_block_id or block.get("block_label") == source_block_id:
+                                source_block = block
+                                break
+                        if source_block:
+                            break
+
+                    if source_block:
+                        # Build a combined view of block content
+                        source_text_parts = []
+                        if source_block.get("context_text"):
+                            source_text_parts.append(f"CONTEXT:\n{source_block['context_text']}")
+                        if source_block.get("sub_questions"):
+                            for sq in source_block["sub_questions"]:
+                                sq_text = f"\nQ{sq.get('local_id', '')}: {sq.get('question_text', '')}"
+                                if sq.get("specific_answer_text"):
+                                    sq_text += f"\nA: {sq['specific_answer_text']}"
+                                source_text_parts.append(sq_text)
+                        if source_block.get("shared_answer_text"):
+                            source_text_parts.append(f"\nSHARED DISCUSSION:\n{source_block['shared_answer_text']}")
+
+                        source_text = "\n".join(source_text_parts)
+                        st.text_area("Block content:", source_text, height=300, disabled=True, key=f"src_block_{current_idx}")
                     else:
-                        st.caption("No explanation available")
+                        st.warning("Source block not found")
                 else:
-                    st.warning("Source question not found")
+                    # Legacy question-based card
+                    source_q_id = card.get("source_question_id", "")
+                    st.markdown(f"**Question ID:** `{source_q_id}`")
+
+                    source_q = None
+                    # Parse chapter from question ID (e.g., "ch1_12b" -> "ch1")
+                    if "_" in source_q_id:
+                        source_ch_key = source_q_id.split("_")[0]
+                        ch_questions = questions_source.get(source_ch_key, [])
+                        for q in ch_questions:
+                            if q.get("full_id") == source_q_id:
+                                source_q = q
+                                break
+
+                    if source_q:
+                        # Show full explanation text as the source reference
+                        explanation = source_q.get("explanation", "")
+                        if explanation:
+                            st.text_area("Explanation (source):", explanation, height=300, disabled=True, key=f"src_exp_{current_idx}")
+                        else:
+                            st.caption("No explanation available")
+                    else:
+                        st.warning("Source question not found")
 
             with right_col:
                 st.markdown("#### Generated Cloze Card")
@@ -3672,9 +4288,16 @@ def render_generate_step():
                     st.markdown(f"**Category:** {card.get('category', 'N/A')}")
 
                 # Show all cards from same source
-                same_source_cards = [c for _, c in filtered_cards if c["source_question_id"] == card["source_question_id"]]
+                if is_block_based:
+                    current_source = card.get("source_block_id", "")
+                    same_source_cards = [c for _, c in filtered_cards if c.get("source_block_id") == current_source]
+                else:
+                    current_source = card.get("source_question_id", "")
+                    same_source_cards = [c for _, c in filtered_cards if c.get("source_question_id") == current_source]
+
                 if len(same_source_cards) > 1:
-                    with st.expander(f"All {len(same_source_cards)} cards from this source"):
+                    expander_label = f"All {len(same_source_cards)} cards from this block" if is_block_based else f"All {len(same_source_cards)} cards from this source"
+                    with st.expander(expander_label):
                         for i, sc in enumerate(same_source_cards, 1):
                             # Convert cloze syntax and <b> tags for display (keep hint)
                             display = re.sub(r'\{\{c\d+::([^}]+)\}\}', r'**[\1]**', sc.get("cloze_text", ""))

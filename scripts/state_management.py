@@ -96,6 +96,16 @@ def get_generated_questions_file() -> str:
     return f"{get_output_dir()}/generated_questions.json"
 
 
+def get_raw_blocks_file() -> str:
+    """Get path for raw block boundaries (first-pass extraction)."""
+    return f"{get_output_dir()}/raw_blocks.json"
+
+
+def get_question_blocks_file() -> str:
+    """Get path for formatted question blocks."""
+    return f"{get_output_dir()}/question_blocks.json"
+
+
 def get_available_textbooks() -> list[str]:
     """Get list of textbooks that have output data."""
     textbooks = []
@@ -147,6 +157,10 @@ def init_session_state():
         st.session_state.pdf_path = None
     if "generated_questions" not in st.session_state:
         st.session_state.generated_questions = {"metadata": {}, "generated_cards": {}}
+    if "raw_blocks" not in st.session_state:
+        st.session_state.raw_blocks = {}
+    if "question_blocks" not in st.session_state:
+        st.session_state.question_blocks = {}
 
     if is_fresh_init:
         st.session_state.initialized = True
@@ -167,6 +181,8 @@ def clear_session_data():
     st.session_state.qc_selected_idx = 0
     st.session_state.pdf_path = None
     st.session_state.generated_questions = {"metadata": {}, "generated_cards": {}}
+    st.session_state.raw_blocks = {}
+    st.session_state.question_blocks = {}
 
 
 # =============================================================================
@@ -244,6 +260,16 @@ def load_saved_data():
     if os.path.exists(generated_file):
         with open(generated_file) as f:
             st.session_state.generated_questions = json.load(f)
+
+    raw_blocks_file = get_raw_blocks_file()
+    if os.path.exists(raw_blocks_file):
+        with open(raw_blocks_file) as f:
+            st.session_state.raw_blocks = json.load(f)
+
+    question_blocks_file = get_question_blocks_file()
+    if os.path.exists(question_blocks_file):
+        with open(question_blocks_file) as f:
+            st.session_state.question_blocks = json.load(f)
 
     # Assign chapters to images if chapters exist but images don't have chapter info
     if st.session_state.chapters and st.session_state.images:
@@ -334,6 +360,20 @@ def save_generated_questions():
     st.session_state.generated_questions["metadata"]["last_updated"] = datetime.now().isoformat()
     with open(get_generated_questions_file(), "w") as f:
         json.dump(st.session_state.generated_questions, f, indent=2)
+
+
+def save_raw_blocks():
+    """Save raw block boundaries (first-pass extraction) to file."""
+    os.makedirs(get_output_dir(), exist_ok=True)
+    with open(get_raw_blocks_file(), "w") as f:
+        json.dump(st.session_state.raw_blocks, f, indent=2)
+
+
+def save_question_blocks():
+    """Save formatted question blocks to file."""
+    os.makedirs(get_output_dir(), exist_ok=True)
+    with open(get_question_blocks_file(), "w") as f:
+        json.dump(st.session_state.question_blocks, f, indent=2)
 
 
 def save_settings():
