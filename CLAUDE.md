@@ -139,35 +139,29 @@ Images are matched to questions using surrounding text context:
 3. LLM prompt: "Find the LAST question number in text BEFORE image"
 4. Multiple images can belong to the same question
 
-### Block-Based Image Distribution
-Questions are grouped into BLOCKS by their main question number. ALL images within a block are distributed to ALL sub-questions, treating them like shared context.
+### LLM-Based Image Distribution
+The LLM handles image assignment during the `format_raw_block` step, following these rules:
 
-**Why this approach?**
-Image position relative to questions is unreliable (e.g., Q4b's image might appear ABOVE the question text). Rather than guessing which image belongs to which sub-question, we include ALL block images with EVERY sub-question and let users remove incorrect ones during QC.
-
-**Image Assignment** (handled by `build_block_aware_image_assignments()`):
-1. Collect ALL images from all sub-questions in the block
-2. Add ALL block images to EACH sub-question's `image_files` array
-3. Assign all images to the FIRST sub-question (for QC management)
-4. Set `context_from` on subsequent sub-questions for inheritance
+**Context vs Sub-Question Images**:
+- **Context images** (in the scenario/case description before sub-questions) → included in ALL sub-questions
+- **Sub-question-specific images** (within/after a specific sub-question) → only in that sub-question
 
 **Example**:
 ```
-Block 4: context + Q4a + Q4b (2 images total, positions unclear)
-  → BOTH images added to Q4a's image_files
-  → BOTH images added to Q4b's image_files
-  → All images assigned to ch1_4a in image_assignments
+Block 4: context (img1) + Q4a (no image) + Q4b (img2)
+  → Q4a.image_files = ["img1"]  (context only)
+  → Q4b.image_files = ["img1", "img2"]  (context + its specific image)
+  → image_assignments: img1 → ch1_4a, img2 → ch1_4b
   → ch1_4b has context_from: "ch1_4a"
-  → User can remove incorrect images during QC
 ```
 
-**Image Retrieval** (handled by `get_images_for_question()`):
-- Returns both directly assigned images AND inherited images via `context_from`
+**Post-Processing** (handled by `build_block_aware_image_assignments()`):
+1. Build `image_assignments` dict (first question with each image wins)
+2. Set `context_from` on subsequent sub-questions for inheritance
 
-**Legacy Context-Only Questions**:
-For questions with `is_context_only: true` (clinical scenarios without choices):
-- Sub-questions have `context_from` pointing to context question
-- Images stay assigned to context question; sub-questions inherit
+**Image Retrieval** (handled by `get_images_for_question()`):
+- Returns images from the question's `image_files` array
+- Prefers `questions` over `questions_merged` to use freshest data
 
 ### Chapter-Aware Processing
 Question numbering restarts each chapter, so IDs are prefixed: `2a` becomes `ch1_2a` or `ch8_2a`.
@@ -189,26 +183,21 @@ A. Choice A  B. Choice B  C. Choice C  D. Choice D
 ### Multi-part Format (with shared context)
 ```
 Context for questions 5a-5c here. 5
-[IMAGE 1]
+[IMAGE 1 - context image]
 Question 5a text? 5a
 A. ...
-[IMAGE 2]
+[IMAGE 2 - specific to 5b]
 Question 5b text? 5b
 A. ...
 ```
 
-**Block-based processing** (current architecture):
+**LLM-based processing** (current architecture):
 - All questions grouped in one BLOCK with `block_id: "ch1_5"`
-- ALL images (IMAGE 1 + IMAGE 2) added to BOTH 5a and 5b's `image_files`
-- All images assigned to first sub-question (5a) in `image_assignments`
+- LLM assigns images based on position:
+  - IMAGE 1 (context) → included in 5a and 5b's `image_files`
+  - IMAGE 2 (after 5b) → only in 5b's `image_files`
 - Sub-question 5b has `context_from: "ch1_5a"` for inheritance
 - Both 5a and 5b include the context text in their `text` field
-- User removes incorrect images during QC step
-
-**Legacy context-only processing**:
-- Context question (5) marked as `is_context_only: true`
-- Sub-questions (5a, 5b) have `context_from: "ch1_5"`
-- Images assigned to context question; sub-questions inherit
 
 ## API Usage
 

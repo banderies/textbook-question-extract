@@ -638,10 +638,24 @@ format_raw_block:
        - correct_answer: The letter (find in answer text: "Answer A" or "2a Answer B")
        - explanation: The specific explanation for THIS question
 
-    6. IMAGE PLACEMENT ([IMAGE: filename.jpeg] markers):
-       - Images in CONTEXT area (before any sub-question) → context.image_files
-       - Images near a SPECIFIC sub-question → that sub_question.image_files
-       - When in doubt, put images in context.image_files (they apply to all sub-questions)
+    6. IMAGE DISTRIBUTION ([IMAGE: filename.jpeg] markers):
+       CRITICAL: Every sub-question must receive ALL context images plus its own specific images.
+
+       Step 1 - Identify image locations:
+       - CONTEXT IMAGES: Images that appear before the first sub-question (in the scenario/case description)
+       - SUB-QUESTION IMAGES: Images that appear within or immediately after a specific sub-question
+
+       Step 2 - Assign images to each sub-question's image_files array:
+       - Each sub-question gets: ALL context images + that sub-question's specific images
+       - Example: If context has [img1.jpg, img2.jpg] and sub-question 2b has [img3.jpg]:
+         - 2a.image_files = ["img1.jpg", "img2.jpg"]  (context only, no specific image)
+         - 2b.image_files = ["img1.jpg", "img2.jpg", "img3.jpg"]  (context + its specific image)
+         - 2c.image_files = ["img1.jpg", "img2.jpg"]  (context only)
+
+       Step 3 - Also list context images separately:
+       - context.image_files should ONLY contain the context images (for reference)
+
+       When in doubt whether an image is context or sub-question-specific, treat it as context.
 
     7. SHARED DISCUSSION (from answer section):
        - Imaging Findings, Discussion, Differential Diagnosis, References
