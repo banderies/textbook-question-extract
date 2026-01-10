@@ -98,10 +98,15 @@ def build_block_aware_image_assignments(formatted_questions: dict) -> dict:
     """
     Build image assignments with block-aware context inheritance.
 
+    ALL images within a block are treated like context and included with EVERY
+    sub-question in that block. This allows users to remove incorrect images
+    during QC rather than relying on position-based assignment.
+
     For questions in the same block:
-    - Shared images (in multiple questions' image_files) → assigned to FIRST sub-question
-    - Question-specific images → assigned to that specific question
-    - Subsequent sub-questions get context_from pointing to first for inheritance
+    - Collect ALL images from all sub-questions in the block
+    - Add ALL block images to EACH sub-question's image_files
+    - Assign all images to the FIRST sub-question (for QC management)
+    - Set context_from on other sub-questions for inheritance
 
     Args:
         formatted_questions: Dict of ch_key -> list of question dicts
@@ -113,9 +118,10 @@ def build_block_aware_image_assignments(formatted_questions: dict) -> dict:
 
     for ch_key, qs in formatted_questions.items():
         # Group questions by block_id
-        block_first_question = {}  # block_id -> first question's full_id
+        block_questions = {}  # block_id -> list of question dicts
+        block_images = {}  # block_id -> set of all image files in block
 
-        # First pass: identify first question per block
+        # First pass: group questions and collect ALL images per block
         for q in qs:
             block_id = q.get("block_id")
             if not block_id:
@@ -125,29 +131,40 @@ def build_block_aware_image_assignments(formatted_questions: dict) -> dict:
                         image_assignments[img_file] = q["full_id"]
                 continue
 
-            # Track first question in each block
-            if block_id not in block_first_question:
-                block_first_question[block_id] = q["full_id"]
+            # Group questions by block
+            if block_id not in block_questions:
+                block_questions[block_id] = []
+                block_images[block_id] = set()
+            block_questions[block_id].append(q)
 
-        # Second pass: assign images and set context_from
-        for q in qs:
-            block_id = q.get("block_id")
-            if not block_id:
-                continue
-
-            first_q_id = block_first_question[block_id]
-
-            # Set context_from for non-first questions in the block
-            if q["full_id"] != first_q_id:
-                if not q.get("context_from"):
-                    q["context_from"] = first_q_id
-
-            # Assign ALL images from this question that aren't already assigned
-            # - Shared images will be assigned to first question (processed first)
-            # - Question-specific images will be assigned to their respective questions
+            # Collect all images from this question
             for img_file in q.get("image_files", []):
-                if img_file not in image_assignments:
-                    image_assignments[img_file] = q["full_id"]
+                block_images[block_id].add(img_file)
+
+        # Second pass: distribute ALL block images to ALL sub-questions
+        for block_id, questions in block_questions.items():
+            all_images = list(block_images[block_id])
+            first_q_id = questions[0]["full_id"] if questions else None
+
+            for q in questions:
+                # Add ALL block images to this question's image_files
+                existing_images = set(q.get("image_files", []))
+                for img_file in all_images:
+                    if img_file not in existing_images:
+                        if "image_files" not in q:
+                            q["image_files"] = []
+                        q["image_files"].append(img_file)
+
+                # Set context_from for non-first questions
+                if first_q_id and q["full_id"] != first_q_id:
+                    if not q.get("context_from"):
+                        q["context_from"] = first_q_id
+
+            # Assign ALL block images to the FIRST sub-question
+            if first_q_id:
+                for img_file in all_images:
+                    if img_file not in image_assignments:
+                        image_assignments[img_file] = first_q_id
 
     return image_assignments
 

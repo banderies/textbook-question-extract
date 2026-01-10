@@ -132,9 +132,11 @@ Formats a raw text block into structured JSON with context, sub-questions, and s
 
 ### Post-Processing
 The `build_block_aware_image_assignments()` function in `ui_components.py` handles:
-- Assigning shared images to FIRST sub-question only
+- Collecting ALL images from all sub-questions in the block
+- Adding ALL block images to EACH sub-question's `image_files` array
+- Assigning all images to the FIRST sub-question (for QC management)
 - Setting `context_from` on subsequent sub-questions
-- Enabling image inheritance via `get_images_for_question()`
+- Users remove incorrect images during QC (since position-based assignment is unreliable)
 
 ---
 

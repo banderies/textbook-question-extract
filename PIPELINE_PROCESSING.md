@@ -54,7 +54,7 @@ The pipeline has 8 steps. Traditional processing is used for PDF parsing, data t
 | `repair_json()` | Traditional | `llm_extraction.py:287` | Fixes unescaped quotes, control chars, trailing commas |
 | Rate limit handling | Traditional | `llm_extraction.py:394` | Exponential backoff retry logic |
 | `full_id` generation | Traditional | `llm_extraction.py` | Concatenates `ch{num}_{local_id}` |
-| `build_block_aware_image_assignments()` | Traditional | `ui_components.py:97` | Assigns shared images to first sub-question, sets `context_from` |
+| `build_block_aware_image_assignments()` | Traditional | `ui_components.py:97` | Distributes ALL block images to ALL sub-questions, assigns to first, sets `context_from` |
 
 ---
 

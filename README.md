@@ -51,7 +51,7 @@ export ANTHROPIC_API_KEY='sk-ant-...'
 
 - **AI-Powered Extraction**: Uses Claude to extract questions, answers, and explanations
 - **Block-Based Processing**: Groups related questions (Q1a, Q1b, Q1c) into blocks that share context
-- **Smart Image Inheritance**: Shared images assigned to first sub-question; others inherit via `context_from`
+- **Block-Wide Image Distribution**: ALL images within a block are included with EVERY sub-question (remove incorrect ones during QC)
 - **Context Association**: Merges clinical scenario context into sub-questions
 - **Chapter-Aware IDs**: Questions prefixed with chapter (e.g., `ch1_2a`, `ch8_2a`)
 - **Interactive QC**: Streamlit GUI for reviewing and correcting assignments
