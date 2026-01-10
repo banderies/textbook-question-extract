@@ -336,22 +336,12 @@ def question_sort_key(q_id: str) -> tuple:
 
 def get_images_for_question(q_id: str) -> list[dict]:
     """
-    Get all images for a question, including inherited images from context_from or image_group.
+    Get all images for a question from its image_files array.
 
-    Returns both directly assigned images AND inherited images from context.
+    Since all block images are distributed to all sub-questions,
+    we simply return images matching the question's image_files.
     """
-    images = []
-    directly_assigned = set()
-
-    # First, get directly assigned images
-    for img in st.session_state.images:
-        assigned_to = st.session_state.image_assignments.get(img["filename"])
-        if assigned_to == q_id:
-            images.append(img)
-            directly_assigned.add(img["filename"])
-
-    # Also check for inherited images (context_from or image_group)
-    # First check merged questions, then regular questions
+    # Find the question to get its image_files
     questions_to_check = []
     for ch_key, qs in st.session_state.questions_merged.items():
         questions_to_check.extend(qs)
@@ -360,30 +350,10 @@ def get_images_for_question(q_id: str) -> list[dict]:
 
     for q in questions_to_check:
         if q["full_id"] == q_id:
-            # Check context_from for inherited images
-            context_from = q.get("context_from")
-            if context_from:
-                for img in st.session_state.images:
-                    assigned_to = st.session_state.image_assignments.get(img["filename"])
-                    if assigned_to == context_from and img["filename"] not in directly_assigned:
-                        images.append(img)
-                        directly_assigned.add(img["filename"])
+            q_image_files = set(q.get("image_files", []))
+            return [img for img in st.session_state.images if img["filename"] in q_image_files]
 
-            # Check image_group (for shared images within a group)
-            image_group = q.get("image_group")
-            if image_group:
-                ch_prefix = q_id.split("_")[0]
-                base_id = f"{ch_prefix}_{image_group}"
-
-                for img in st.session_state.images:
-                    assigned_to = st.session_state.image_assignments.get(img["filename"])
-                    if assigned_to == base_id and img["filename"] not in directly_assigned:
-                        images.append(img)
-                        directly_assigned.add(img["filename"])
-
-            break  # Found the question, stop searching
-
-    return images
+    return []
 
 
 def get_all_question_options() -> list[str]:
@@ -2521,21 +2491,10 @@ def render_context_step():
                 st.markdown(f"### Chapter {ch_key} ({ch_actual} questions" +
                            (f" + {ch_context_only} context-only" if ch_context_only > 0 else "") + ")")
 
-            # Get images - check direct assignment AND inherited from context
-            directly_assigned = set()
-            q_images = []
-            for img in st.session_state.images:
-                if assignments_to_use.get(img["filename"]) == q["full_id"]:
-                    q_images.append(img)
-                    directly_assigned.add(img["filename"])
-
-            # Also inherit images from context_from (even if there are direct images)
-            if q.get("context_from"):
-                context_id = q.get("context_from")
-                for img in st.session_state.images:
-                    if assignments_to_use.get(img["filename"]) == context_id:
-                        if img["filename"] not in directly_assigned:
-                            q_images.append(img)
+            # Get images directly from question's image_files array
+            # (all block images are distributed to all sub-questions)
+            q_image_files = set(q.get("image_files", []))
+            q_images = [img for img in st.session_state.images if img["filename"] in q_image_files]
 
             indicators = []
 
@@ -3565,21 +3524,11 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                                     explanation = explanation + "\n\n<b>Shared Discussion:</b>\n" + shared_answer
                                 break
 
-            # Handle image
+            # Handle image - use question's image_files directly
+            # (all block images are distributed to all sub-questions)
             image_html = ''
             if include_images:
-                # Find images assigned to this question
-                assigned_imgs = set()
-                for fname, assigned_q in image_assignments.items():
-                    if assigned_q == q_id:
-                        assigned_imgs.add(fname)
-
-                # Also include inherited images via context_from (even if there are direct images)
-                if q.get('context_from'):
-                    context_id = q['context_from']
-                    for fname, assigned_q in image_assignments.items():
-                        if assigned_q == context_id:
-                            assigned_imgs.add(fname)
+                assigned_imgs = set(q.get('image_files', []))
 
                 for img_fname in assigned_imgs:
                     if img_fname in image_lookup:
