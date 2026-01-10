@@ -142,26 +142,43 @@ Images are matched to questions using surrounding text context:
 ### LLM-Based Image Distribution
 The LLM handles image assignment during the `format_raw_block` step, following these rules:
 
-**Context vs Sub-Question Images**:
-- **Context images** (in the scenario/case description before sub-questions) → included in ALL sub-questions
-- **Sub-question-specific images** (within/after a specific sub-question) → only in that sub-question
+**Question vs Answer Images**:
+Images are tracked separately based on which section they appear in:
+- `image_files` → Images from QUESTION section (shown with the question in Anki)
+- `answer_image_files` → Images from ANSWER section (shown only in explanation in Anki)
+
+**Question Image Distribution**:
+- **Context images** (in scenario before sub-questions) → included in ALL sub-questions' `image_files`
+- **Sub-question-specific images** → only in that sub-question's `image_files`
+
+**Answer Image Distribution**:
+- **Sub-question answer images** → in that sub-question's `answer_image_files`
+- **Shared discussion images** → in all sub-questions' `answer_image_files`
 
 **Example**:
 ```
-Block 4: context (img1) + Q4a (no image) + Q4b (img2)
-  → Q4a.image_files = ["img1"]  (context only)
-  → Q4b.image_files = ["img1", "img2"]  (context + its specific image)
-  → image_assignments: img1 → ch1_4a, img2 → ch1_4b
-  → ch1_4b has context_from: "ch1_4a"
+Block 4:
+  Question section: context (img1) + Q4a (no image) + Q4b (img2)
+  Answer section: shared discussion (img3)
+
+  → Q4a.image_files = ["img1"]
+  → Q4a.answer_image_files = ["img3"]
+  → Q4b.image_files = ["img1", "img2"]
+  → Q4b.answer_image_files = ["img3"]
 ```
+
+**In Anki Cards**:
+- `Image` field: question images (shown on front and back)
+- `AnswerImage` field: answer images (shown only on back, after explanation)
 
 **Post-Processing** (handled by `build_block_aware_image_assignments()`):
 1. Build `image_assignments` dict (first question with each image wins)
 2. Set `context_from` on subsequent sub-questions for inheritance
 
-**Image Retrieval** (handled by `get_images_for_question()`):
-- Returns images from the question's `image_files` array
-- Prefers `questions` over `questions_merged` to use freshest data
+**Image Retrieval**:
+- `get_images_for_question()` → returns question images from `image_files`
+- `get_answer_images_for_question()` → returns answer images from `answer_image_files`
+- Both prefer `questions` over `questions_merged` to use freshest data
 
 ### Chapter-Aware Processing
 Question numbering restarts each chapter, so IDs are prefixed: `2a` becomes `ch1_2a` or `ch8_2a`.

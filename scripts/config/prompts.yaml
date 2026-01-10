@@ -639,23 +639,29 @@ format_raw_block:
        - explanation: The specific explanation for THIS question
 
     6. IMAGE DISTRIBUTION ([IMAGE: filename.jpeg] markers):
-       CRITICAL: Every sub-question must receive ALL context images plus its own specific images.
+       Images appear in TWO sections - track them separately:
 
-       Step 1 - Identify image locations:
-       - CONTEXT IMAGES: Images that appear before the first sub-question (in the scenario/case description)
-       - SUB-QUESTION IMAGES: Images that appear within or immediately after a specific sub-question
+       A. QUESTION IMAGES (from RAW QUESTION TEXT):
+          - CONTEXT IMAGES: Before the first sub-question (in scenario/case description)
+          - SUB-QUESTION IMAGES: Within or immediately after a specific sub-question
 
-       Step 2 - Assign images to each sub-question's image_files array:
-       - Each sub-question gets: ALL context images + that sub-question's specific images
-       - Example: If context has [img1.jpg, img2.jpg] and sub-question 2b has [img3.jpg]:
-         - 2a.image_files = ["img1.jpg", "img2.jpg"]  (context only, no specific image)
-         - 2b.image_files = ["img1.jpg", "img2.jpg", "img3.jpg"]  (context + its specific image)
-         - 2c.image_files = ["img1.jpg", "img2.jpg"]  (context only)
+          Assign to each sub-question's `image_files` array:
+          - Each sub-question gets: ALL context images + that sub-question's specific images
+          - Example: context has [img1.jpg], sub-question 2b has [img2.jpg]:
+            - 2a.image_files = ["img1.jpg"]  (context only)
+            - 2b.image_files = ["img1.jpg", "img2.jpg"]  (context + specific)
 
-       Step 3 - Also list context images separately:
-       - context.image_files should ONLY contain the context images (for reference)
+       B. ANSWER IMAGES (from RAW ANSWER TEXT):
+          - Images in the answer/explanation section
+          - These should ONLY appear in explanations, not with the question
 
-       When in doubt whether an image is context or sub-question-specific, treat it as context.
+          Assign to each sub-question's `answer_image_files` array:
+          - If an answer image relates to a specific sub-question, add it there
+          - If it's in shared_discussion, add to `shared_discussion.image_files`
+
+       When in doubt:
+       - Question section images → treat as context (all sub-questions)
+       - Answer section images → put in shared_discussion.image_files
 
     7. SHARED DISCUSSION (from answer section):
        - Imaging Findings, Discussion, Differential Diagnosis, References
@@ -675,7 +681,8 @@ format_raw_block:
           "choices": {{"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"}},
           "correct_answer": "B",
           "explanation": "Brief explanation for this specific question",
-          "image_files": ["question_specific_image.jpeg"]
+          "image_files": ["question_image.jpeg"],
+          "answer_image_files": ["answer_image.jpeg"]
         }}
       ],
       "shared_discussion": {{
@@ -683,7 +690,8 @@ format_raw_block:
         "discussion": "Discussion text if present",
         "differential_diagnosis": "Differential diagnosis text if present",
         "references": ["Reference 1", "Reference 2"],
-        "full_text": "All additional educational content"
+        "full_text": "All additional educational content",
+        "image_files": ["shared_answer_image.jpeg"]
       }}
     }}
 

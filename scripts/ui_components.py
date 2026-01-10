@@ -310,7 +310,7 @@ def question_sort_key(q_id: str) -> tuple:
 
 def get_images_for_question(q_id: str) -> list[dict]:
     """
-    Get all images for a question from its image_files array.
+    Get question images (from image_files array).
 
     Prefers questions over questions_merged to use the freshest data
     (in case Step 4 was re-run after Step 5).
@@ -326,6 +326,26 @@ def get_images_for_question(q_id: str) -> list[dict]:
         if q["full_id"] == q_id:
             q_image_files = set(q.get("image_files", []))
             return [img for img in st.session_state.images if img["filename"] in q_image_files]
+
+    return []
+
+
+def get_answer_images_for_question(q_id: str) -> list[dict]:
+    """
+    Get answer/explanation images (from answer_image_files array).
+
+    These images should only appear in the explanation section, not with the question.
+    """
+    questions_to_check = []
+    for ch_key, qs in st.session_state.questions.items():
+        questions_to_check.extend(qs)
+    for ch_key, qs in st.session_state.questions_merged.items():
+        questions_to_check.extend(qs)
+
+    for q in questions_to_check:
+        if q["full_id"] == q_id:
+            answer_image_files = set(q.get("answer_image_files", []))
+            return [img for img in st.session_state.images if img["filename"] in answer_image_files]
 
     return []
 
@@ -1766,6 +1786,7 @@ def render_format_step():
         # Get shared discussion
         shared = formatted_block.get("shared_discussion", {})
         shared_text = shared.get("full_text", "")
+        shared_answer_images = shared.get("image_files", [])  # Images from answer section
         if not shared_text:
             # Build from components
             parts = []
@@ -1824,6 +1845,12 @@ def render_format_step():
                 if img not in all_images:
                     all_images.append(img)
 
+            # Combine sub-question answer images with shared answer images
+            all_answer_images = list(sq.get("answer_image_files", []))
+            for img in shared_answer_images:
+                if img not in all_answer_images:
+                    all_answer_images.append(img)
+
             questions.append({
                 "full_id": full_id,
                 "local_id": local_id,
@@ -1834,6 +1861,7 @@ def render_format_step():
                 "answer_end": block.get("answer_end", 0),
                 "correct_letter": sq.get("correct_answer", ""),
                 "image_files": all_images,
+                "answer_image_files": all_answer_images,
                 "question_text": q_text,
                 "answer_text": explanation,
                 "is_context_only": False,
@@ -2140,10 +2168,14 @@ def render_format_step():
                 st.caption(f"{len(questions)} formatted questions in {selected_ch}")
 
                 for q in questions:
-                    q_images = [img for img in st.session_state.images
-                               if st.session_state.image_assignments.get(img["filename"]) == q["full_id"]]
+                    # Get question images and answer images from the question's arrays
+                    q_image_files = set(q.get("image_files", []))
+                    a_image_files = set(q.get("answer_image_files", []))
+                    q_images = [img for img in st.session_state.images if img["filename"] in q_image_files]
+                    a_images = [img for img in st.session_state.images if img["filename"] in a_image_files]
 
-                    img_indicator = f" [{len(q_images)} img]" if q_images else ""
+                    total_imgs = len(q_images) + len(a_images)
+                    img_indicator = f" [{total_imgs} img]" if total_imgs > 0 else ""
                     error_indicator = " [ERROR]" if q.get("error") else ""
                     display_text = q['text'][:70] + "..." if len(q['text']) > 70 else q['text']
 
@@ -2167,9 +2199,16 @@ def render_format_step():
 
                         with col2:
                             if q_images:
+                                st.markdown("**Question Images:**")
                                 for img in q_images:
                                     if os.path.exists(img["filepath"]):
                                         st.image(img["filepath"], caption=f"Page {img['page']}", width=200)
+
+                            if a_images:
+                                st.markdown("**Answer Images:**")
+                                for img in a_images:
+                                    if os.path.exists(img["filepath"]):
+                                        st.image(img["filepath"], caption=f"Page {img['page']} (answer)", width=200)
 
 
 # =============================================================================
@@ -3034,7 +3073,8 @@ def render_qc_step():
                                 st.text_area("", shared_answer, height=200, disabled=True, key=f"qc_block_shared_{q_id}")
 
             with right_col:
-                assigned_images = get_images_for_question(q_id)
+                question_images = get_images_for_question(q_id)
+                answer_images = get_answer_images_for_question(q_id)
 
                 ch_num = int(ch_key[2:])
                 ch_start = next((c["start_page"] for c in st.session_state.chapters if c["chapter_number"] == ch_num), 1)
@@ -3066,9 +3106,10 @@ def render_qc_step():
                 images_tab, pdf_tab = st.tabs(["Images", "PDF Pages"])
 
                 with images_tab:
-                    if assigned_images:
-                        st.subheader("Assigned Image(s)")
-                        for img in assigned_images:
+                    # Question images (shown with the question)
+                    if question_images:
+                        st.subheader("Question Image(s)")
+                        for img in question_images:
                             filepath = img["filepath"]
                             if os.path.exists(filepath):
                                 st.image(filepath, caption=f"Page {img['page']} - {img['filename']}", use_column_width=True)
@@ -3078,6 +3119,19 @@ def render_qc_step():
                             else:
                                 st.warning(f"Image not found: {filepath}")
 
+                    # Answer images (shown in explanation only)
+                    if answer_images:
+                        st.subheader("Answer Image(s)")
+                        st.caption("These images appear in the explanation only")
+                        for img in answer_images:
+                            filepath = img["filepath"]
+                            if os.path.exists(filepath):
+                                st.image(filepath, caption=f"Page {img['page']} - {img['filename']} (answer)", use_column_width=True)
+                            else:
+                                st.warning(f"Image not found: {filepath}")
+
+                    # Expander for adding more images (if there are already some)
+                    if question_images or answer_images:
                         with st.expander("Assign different/additional image"):
                             unassigned = [img for img in st.session_state.images
                                           if img["filename"] not in st.session_state.image_assignments
@@ -3231,6 +3285,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             {'name': 'Answer'},
             {'name': 'Explanation'},
             {'name': 'Image'},
+            {'name': 'AnswerImage'},
             {'name': 'Chapter'},
             {'name': 'Source'},
         ],
@@ -3252,6 +3307,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                         <hr class="answer-divider">
                         <div class="answer">{{Answer}}</div>
                         <div class="explanation">{{Explanation}}</div>
+                        {{#AnswerImage}}<div class="image answer-image">{{AnswerImage}}</div>{{/AnswerImage}}
                         {{#Source}}<div class="source-ref">{{Source}}</div>{{/Source}}
                     </div>
                 ''',
@@ -3498,19 +3554,30 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                                     explanation = explanation + "\n\n<b>Shared Discussion:</b>\n" + shared_answer
                                 break
 
-            # Handle image - use question's image_files directly
-            # (all block images are distributed to all sub-questions)
+            # Handle images - question images and answer images separately
             image_html = ''
+            answer_image_html = ''
             if include_images:
-                assigned_imgs = set(q.get('image_files', []))
-
-                for img_fname in assigned_imgs:
+                # Question images (shown with the question)
+                question_imgs = set(q.get('image_files', []))
+                for img_fname in question_imgs:
                     if img_fname in image_lookup:
                         img_data = image_lookup[img_fname]
                         filepath = img_data.get('filepath', '')
                         if os.path.exists(filepath):
                             media_files.append(filepath)
                             image_html += f'<img src="{img_fname}">'
+
+                # Answer images (shown only in explanation)
+                answer_imgs = set(q.get('answer_image_files', []))
+                for img_fname in answer_imgs:
+                    if img_fname in image_lookup:
+                        img_data = image_lookup[img_fname]
+                        filepath = img_data.get('filepath', '')
+                        if os.path.exists(filepath):
+                            if filepath not in media_files:  # Avoid duplicates
+                                media_files.append(filepath)
+                            answer_image_html += f'<img src="{img_fname}">'
 
             # Build source reference
             local_id = q.get('local_id', q_id.split('_')[-1])
@@ -3535,7 +3602,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             # Create note
             note = genanki.Note(
                 model=model,
-                fields=[q_text, choices_html, correct, explanation, image_html, ch_title, source_ref],
+                fields=[q_text, choices_html, correct, explanation, image_html, answer_image_html, ch_title, source_ref],
                 tags=[f"chapter{ch_num}"]
             )
             ch_deck.notes.append(note)
