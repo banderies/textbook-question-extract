@@ -705,6 +705,32 @@ def extract_chapter_text(pages: list[dict], start_page: int, end_page: Optional[
     return "\n\n".join(chapter_pages)
 
 
+def get_pages_for_line_range(start_line: int, end_line: int, pages: list[dict]) -> list[int]:
+    """
+    Convert a line range to a list of page numbers.
+
+    Args:
+        start_line: Starting line number (1-indexed)
+        end_line: Ending line number (1-indexed, inclusive)
+        pages: List of page dicts with 'page', 'start_line', 'end_line' keys
+
+    Returns:
+        Sorted list of page numbers that contain lines in the range
+    """
+    if start_line <= 0 or end_line < start_line:
+        return []
+
+    page_set = set()
+    for p in pages:
+        p_start = p.get("start_line", 0)
+        p_end = p.get("end_line", 0)
+        # Check if any lines in the range fall within this page
+        if p_end > start_line and p_start <= end_line:
+            page_set.add(p["page"])
+
+    return sorted(page_set)
+
+
 def get_questions_sharing_image(q_id: str, questions: dict) -> list[str]:
     """Get all question IDs that share the same image_group as the given question."""
     for ch_key, qs in questions.items():

@@ -28,7 +28,7 @@ from pdf_extraction import (
     extract_images_from_pdf, assign_chapters_to_images,
     extract_chapter_text, render_pdf_page,
     extract_text_with_lines, insert_image_markers, build_chapter_text_with_lines,
-    extract_lines_by_range, extract_lines_by_range_mapped
+    extract_lines_by_range, extract_lines_by_range_mapped, get_pages_for_line_range
 )
 from llm_extraction import (
     get_anthropic_client, get_model_options, get_model_id,
@@ -1412,6 +1412,10 @@ def render_questions_step():
                 lines_with_images, a_start, a_end, line_mapping, preserve_line_numbers=True
             ) if a_start > 0 else ""
 
+            # Calculate page numbers from line ranges
+            q_pages = get_pages_for_line_range(q_start, q_end, pages_with_lines)
+            a_pages = get_pages_for_line_range(a_start, a_end, pages_with_lines)
+
             raw_blocks.append({
                 "block_id": f"ch{ch_num}_{block_id}",
                 "block_label": block_id,
@@ -1420,6 +1424,8 @@ def render_questions_step():
                 "question_end": q_end,
                 "answer_start": a_start,
                 "answer_end": a_end,
+                "question_pages": q_pages,
+                "answer_pages": a_pages,
                 "question_text_raw": question_text_raw,  # Raw text with line numbers
                 "answer_text_raw": answer_text_raw,       # Raw text with line numbers
                 "formatted": False  # Will be set to True after Step 4 formatting
@@ -1531,6 +1537,10 @@ def render_questions_step():
                         lines_with_images, a_start, a_end, line_mapping, preserve_line_numbers=True
                     ) if a_start > 0 else ""
 
+                    # Calculate page numbers from line ranges
+                    q_pages = get_pages_for_line_range(q_start, q_end, pages_with_lines)
+                    a_pages = get_pages_for_line_range(a_start, a_end, pages_with_lines)
+
                     raw_blocks.append({
                         "block_id": f"ch{ch_num}_{block_id}",
                         "block_label": block_id,
@@ -1539,6 +1549,8 @@ def render_questions_step():
                         "question_end": q_end,
                         "answer_start": a_start,
                         "answer_end": a_end,
+                        "question_pages": q_pages,
+                        "answer_pages": a_pages,
                         "question_text_raw": question_text_raw,
                         "answer_text_raw": answer_text_raw,
                         "formatted": False
@@ -1626,7 +1638,13 @@ def render_questions_step():
                     formatted_indicator = " [formatted]" if block.get("formatted", False) else ""
 
                     with st.expander(f"Block {block_label}{formatted_indicator}: {q_preview}"):
-                        st.markdown(f"**Lines:** Q={block['question_start']}-{block['question_end']}, A={block['answer_start']}-{block['answer_end']}")
+                        # Get page numbers - use stored values if available, otherwise calculate
+                        q_pages = block.get('question_pages') or get_pages_for_line_range(block['question_start'], block['question_end'], st.session_state.pages)
+                        a_pages = block.get('answer_pages') or get_pages_for_line_range(block['answer_start'], block['answer_end'], st.session_state.pages)
+                        q_pages_str = f"{q_pages[0]}-{q_pages[-1]}" if len(q_pages) > 1 else str(q_pages[0]) if q_pages else "?"
+                        a_pages_str = f"{a_pages[0]}-{a_pages[-1]}" if len(a_pages) > 1 else str(a_pages[0]) if a_pages else "?"
+
+                        st.markdown(f"**Lines:** Q={block['question_start']}-{block['question_end']}, A={block['answer_start']}-{block['answer_end']} | **Pages:** Q={q_pages_str}, A={a_pages_str}")
 
                         st.markdown("**Question Text (raw with line numbers):**")
                         st.text_area("", block.get("question_text_raw", ""), height=200, key=f"raw_q_{block['block_id']}", disabled=True)
