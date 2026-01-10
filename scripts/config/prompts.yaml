@@ -615,7 +615,9 @@ format_raw_block:
 
     PARSING RULES:
 
-    1. IGNORE [LINE:NNNN] markers - they are metadata only.
+    1. MARKERS TO UNDERSTAND:
+       - [LINE:NNNN] markers: Ignore these, they are line number metadata
+       - [PAGE N] markers: These indicate page breaks - extract page numbers for questions/answers
 
     2. FIND THE QUESTION IDENTIFIERS in the text:
        - Look for numbers like "1", "2", "3" OR sub-question IDs like "1a", "1b", "2a", "2b"
@@ -667,6 +669,13 @@ format_raw_block:
        - Imaging Findings, Discussion, Differential Diagnosis, References
        - This content applies to ALL questions in the block
 
+    8. PAGE NUMBERS (from [PAGE N] markers):
+       - Look for [PAGE N] markers in the text to determine page numbers
+       - question_pages: List of page numbers where the question appears (from RAW QUESTION TEXT)
+       - answer_pages: List of page numbers where the answer appears (from RAW ANSWER TEXT)
+       - If a sub-question spans multiple pages, include all page numbers
+       - If no [PAGE N] marker is found, use an empty array
+
     OUTPUT FORMAT - Return ONLY valid JSON:
     {{
       "block_id": "{block_id}",
@@ -682,7 +691,9 @@ format_raw_block:
           "correct_answer": "B",
           "explanation": "Brief explanation for this specific question",
           "image_files": ["question_image.jpeg"],
-          "answer_image_files": ["answer_image.jpeg"]
+          "answer_image_files": ["answer_image.jpeg"],
+          "question_pages": [14, 15],
+          "answer_pages": [42]
         }}
       ],
       "shared_discussion": {{

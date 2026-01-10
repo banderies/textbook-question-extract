@@ -30,7 +30,8 @@ STEP 3: EXTRACT QUESTIONS (Block-Based)
     ↓
 STEP 4: FORMAT QUESTIONS
 ├── Second pass: LLM formats each block into structured JSON
-├── Block-aware image assignment: shared images → first sub-question
+├── Extracts page numbers from [PAGE N] markers in raw text
+├── Separates question images from answer images
 ├── Sets context_from on subsequent sub-questions for inheritance
 └── Output: questions_by_chapter.json + image_assignments.json + raw_questions.json
     ↓

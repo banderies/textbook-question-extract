@@ -384,10 +384,18 @@ def build_chapter_text_with_lines(
             break
         current_orig_idx += 1
 
-    # Build output preserving GLOBAL line numbers
+    # Build a lookup of which page each line belongs to
+    line_to_page = {}
+    for p in pages:
+        if p["page"] >= start_page and (end_page is None or p["page"] < end_page):
+            for line_num in range(p["start_line"], p["end_line"]):
+                line_to_page[line_num] = p["page"]
+
+    # Build output preserving GLOBAL line numbers and PAGE markers
     output_lines = []
     global_line_num = start_line + 1  # 1-indexed global line number
     line_mapping = {}
+    current_page = None
 
     for i in range(actual_start, min(actual_end, len(lines))):
         line = lines[i]
@@ -396,6 +404,13 @@ def build_chapter_text_with_lines(
             # Image markers don't get line numbers
             output_lines.append(line)
         else:
+            # Check if we're on a new page and add page marker
+            orig_line_idx = global_line_num - 1  # Convert back to 0-indexed
+            page_num = line_to_page.get(orig_line_idx)
+            if page_num and page_num != current_page:
+                output_lines.append(f"[PAGE {page_num}]")
+                current_page = page_num
+
             output_lines.append(f"[LINE:{global_line_num:06d}] {line}")
             line_mapping[global_line_num] = i
             global_line_num += 1

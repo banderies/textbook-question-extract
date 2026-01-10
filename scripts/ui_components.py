@@ -1851,6 +1851,10 @@ def render_format_step():
                 if img not in all_answer_images:
                     all_answer_images.append(img)
 
+            # Get page numbers from LLM response
+            question_pages = sq.get("question_pages", [])
+            answer_pages = sq.get("answer_pages", [])
+
             questions.append({
                 "full_id": full_id,
                 "local_id": local_id,
@@ -1869,7 +1873,11 @@ def render_format_step():
                 "choices": sq.get("choices", {}),
                 "text": q_text,  # For compatibility
                 "correct_answer": sq.get("correct_answer", ""),
-                "explanation": explanation
+                "explanation": explanation,
+                "question_pages": question_pages,
+                "question_page": question_pages[0] if question_pages else None,
+                "answer_pages": answer_pages,
+                "answer_page": answer_pages[0] if answer_pages else None
             })
 
         return ch_key, questions, formatted_block
