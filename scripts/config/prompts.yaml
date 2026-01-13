@@ -771,15 +771,10 @@ generate_cloze_cards_from_block:
         "cloze_text": "<b>{{{{c1::Finding::type}}}}</b> is seen in this <b>condition</b>.",
         "learning_point": "Key concept being tested",
         "confidence": "high",
-        "category": "imaging",
-        "source_sub_question_id": "1a"
+        "category": "imaging"
       }},
       ...
     ]
-
-    source_sub_question_id should be:
-    - The sub-question ID (e.g., "1a", "7b") if the fact relates to a specific sub-question
-    - Empty string "" if the fact is from shared discussion or applies to the whole block
 
     Categories: anatomy, pathology, imaging, clinical, differential, statistics, mechanism
 

@@ -2849,7 +2849,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             # generated_cards is keyed by chapter (e.g., "ch4"), each value is a list of cards
             # Cards can have either:
             #   - source_question_id (legacy) - e.g., "ch4_2a"
-            #   - source_block_id + source_sub_question_id (block-based)
+            #   - source_block_id (block-based) - e.g., "ch4_2"
 
             # Build question lookup to get source explanations
             question_lookup = {}
@@ -2894,7 +2894,6 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
 
                     # Determine if block-based or question-based card
                     source_block_id = card.get('source_block_id', '')
-                    source_sub_q_id = card.get('source_sub_question_id', '')
                     source_q_id = card.get('source_question_id', '')
 
                     # Build source reference and extra info
@@ -2904,7 +2903,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                     if source_block_id:
                         # Block-based card
                         source_block = block_lookup.get(source_block_id, {})
-                        local_id = source_sub_q_id if source_sub_q_id else source_block_id
+                        local_id = source_block_id
 
                         if card.get('learning_point'):
                             extra_parts.append(f"<b>Learning point:</b> {card['learning_point']}")
@@ -2923,8 +2922,6 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                                 extra_parts.append(f"<hr><b>Discussion:</b><br>{shared_answer}")
 
                         source_ref = f"Generated from Block {source_block_id}"
-                        if source_sub_q_id:
-                            source_ref += f", Q{source_sub_q_id}"
                     else:
                         # Legacy question-based card
                         local_id = source_q_id.split('_')[-1] if '_' in source_q_id else source_q_id
@@ -3225,7 +3222,6 @@ def render_generate_step():
                                 full_card = {
                                     "generated_id": f"{ch_key}_{block_id}_gen_{i}",
                                     "source_block_id": block_id,
-                                    "source_sub_question_id": card.get("source_sub_question_id", ""),
                                     "cloze_text": card.get("cloze_text", ""),
                                     "learning_point": card.get("learning_point", ""),
                                     "confidence": card.get("confidence", "medium"),
@@ -3368,7 +3364,6 @@ def render_generate_step():
                                 full_card = {
                                     "generated_id": f"{ch_key}_{block_id}_gen_{i}",
                                     "source_block_id": block_id,
-                                    "source_sub_question_id": card.get("source_sub_question_id", ""),
                                     "cloze_text": card.get("cloze_text", ""),
                                     "learning_point": card.get("learning_point", ""),
                                     "confidence": card.get("confidence", "medium"),
@@ -3532,12 +3527,9 @@ def render_generate_step():
                 st.markdown("#### Source")
 
                 if is_block_based:
-                    # Block-based card - show block info and full context
+                    # Block-based card - show block info
                     source_block_id = card.get("source_block_id", "")
-                    source_sub_q_id = card.get("source_sub_question_id", "")
                     st.markdown(f"**Block:** `{source_block_id}`")
-                    if source_sub_q_id:
-                        st.markdown(f"**Sub-question:** `{source_sub_q_id}`")
 
                     # Find the source block
                     source_block = None

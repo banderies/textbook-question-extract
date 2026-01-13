@@ -1621,7 +1621,6 @@ def generate_cloze_cards_from_block_llm(
         - learning_point: Brief description
         - confidence: "high" or "medium"
         - category: anatomy, pathology, imaging, clinical, differential, statistics
-        - source_sub_question: Which sub-question this came from, or "shared"
     """
     import time
     import anthropic
