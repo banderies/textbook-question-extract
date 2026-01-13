@@ -18,8 +18,8 @@ Usage:
 import streamlit as st
 
 from state_management import init_session_state, save_settings
+from ui import render_sidebar
 from ui_components import (
-    render_sidebar,
     render_source_step,
     render_chapters_step,
     render_questions_step,

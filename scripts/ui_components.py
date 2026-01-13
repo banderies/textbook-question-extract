@@ -1,16 +1,15 @@
 """
 UI Components Module
 
-Contains all Streamlit UI rendering functions.
+Contains all Streamlit UI rendering functions for step-by-step processing.
+Helper functions and sidebar are in the ui/ package.
 """
 
 import os
 import re
-import copy
 import json
 from pathlib import Path
 from datetime import datetime
-from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import streamlit as st
@@ -21,839 +20,46 @@ from state_management import (
     load_settings, load_qc_progress, save_settings, save_chapters,
     save_questions, save_raw_questions, save_images, save_pages, save_image_assignments,
     save_questions_merged, save_image_assignments_merged, save_qc_progress,
-    get_raw_questions_file, get_questions_file,
-    get_raw_blocks_file, get_question_blocks_file, save_raw_blocks, save_question_blocks
+    get_raw_questions_file, get_raw_blocks_file, save_raw_blocks, save_question_blocks
 )
 from pdf_extraction import (
     extract_images_from_pdf, assign_chapters_to_images,
     extract_chapter_text, render_pdf_page,
     extract_text_with_lines, insert_image_markers, build_chapter_text_with_lines,
-    extract_lines_by_range, extract_lines_by_range_mapped, get_pages_for_line_range
+    extract_lines_by_range_mapped, get_pages_for_line_range
 )
 from llm_extraction import (
-    get_anthropic_client, get_model_options, get_model_id,
-    identify_chapters_llm, extract_qa_pairs_llm, process_chapter_extraction,
-    extract_line_ranges_llm, format_qa_pair_llm,
-    match_images_to_questions_llm, add_page_numbers_to_questions,
-    load_prompts, save_prompts, reload_prompts, get_prompt, stream_message,
-    get_extraction_logger, get_log_file_path, reset_logger,
-    generate_cloze_cards_from_block_llm,
+    get_anthropic_client, get_model_options,
+    identify_chapters_llm, add_page_numbers_to_questions,
+    load_prompts, save_prompts, reload_prompts,
+    get_extraction_logger, reset_logger,
     identify_question_blocks_llm, format_raw_block_llm
 )
 
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-def play_completion_sound():
-    """Play a pleasant notification sound when processing completes.
-
-    Uses Web Audio API to generate a short, pleasant tone.
-    """
-    import streamlit.components.v1 as components
-
-    # JavaScript to play a completion sound using Web Audio API
-    # Creates a pleasant two-tone chime
-    sound_js = """
-    <script>
-    (function() {
-        try {
-            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-            // First tone (higher pitch)
-            const osc1 = audioCtx.createOscillator();
-            const gain1 = audioCtx.createGain();
-            osc1.connect(gain1);
-            gain1.connect(audioCtx.destination);
-            osc1.frequency.value = 880; // A5
-            osc1.type = 'sine';
-            gain1.gain.setValueAtTime(0.3, audioCtx.currentTime);
-            gain1.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
-            osc1.start(audioCtx.currentTime);
-            osc1.stop(audioCtx.currentTime + 0.3);
-
-            // Second tone (lower pitch, slightly delayed)
-            const osc2 = audioCtx.createOscillator();
-            const gain2 = audioCtx.createGain();
-            osc2.connect(gain2);
-            gain2.connect(audioCtx.destination);
-            osc2.frequency.value = 1318.5; // E6
-            osc2.type = 'sine';
-            gain2.gain.setValueAtTime(0, audioCtx.currentTime + 0.1);
-            gain2.gain.setValueAtTime(0.3, audioCtx.currentTime + 0.1);
-            gain2.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
-            osc2.start(audioCtx.currentTime + 0.1);
-            osc2.stop(audioCtx.currentTime + 0.5);
-        } catch (e) {
-            console.log('Audio playback not supported:', e);
-        }
-    })();
-    </script>
-    """
-    components.html(sound_js, height=0, width=0)
-
-
-def build_block_aware_image_assignments(formatted_questions: dict) -> dict:
-    """
-    Build image assignments from questions' image_files arrays.
-
-    The LLM handles image distribution during formatting:
-    - Context images are included in ALL sub-questions' image_files
-    - Sub-question-specific images are only in that sub-question's image_files
-
-    This function:
-    - Builds the image_assignments dict (maps image filename -> question ID)
-    - Sets context_from on non-first questions in each block for inheritance
-
-    Args:
-        formatted_questions: Dict of ch_key -> list of question dicts
-
-    Returns:
-        Dict mapping image filenames to question full_ids
-    """
-    image_assignments = {}
-
-    for ch_key, qs in formatted_questions.items():
-        # Group questions by block_id to set context_from
-        block_questions = {}  # block_id -> list of question dicts
-
-        for q in qs:
-            block_id = q.get("block_id")
-
-            # Assign each image to this question (first occurrence wins)
-            for img_file in q.get("image_files", []):
-                if img_file not in image_assignments:
-                    image_assignments[img_file] = q["full_id"]
-
-            # Group questions by block for context_from assignment
-            if block_id:
-                if block_id not in block_questions:
-                    block_questions[block_id] = []
-                block_questions[block_id].append(q)
-
-        # Set context_from for non-first questions in each block
-        for block_id, questions in block_questions.items():
-            if len(questions) > 1:
-                first_q_id = questions[0]["full_id"]
-                for q in questions[1:]:
-                    if not q.get("context_from"):
-                        q["context_from"] = first_q_id
-
-    return image_assignments
-
-
-def get_selected_model_id() -> str:
-    """Get the currently selected Claude model ID."""
-    return get_model_id(st.session_state.selected_model)
-
-
-def clear_step_data(step_id: str, cascade: bool = True):
-    """Clear data for a specific step and all subsequent steps, allowing re-run from that point.
-
-    Args:
-        step_id: One of 'source', 'chapters', 'questions', 'format', 'qc', 'generate', 'export'
-        cascade: If True, also clear all subsequent steps (default True)
-    """
-    # Define step order for cascading
-    step_order = ["source", "chapters", "questions", "format", "qc", "generate", "export"]
-
-    # Find the index of the current step
-    try:
-        start_idx = step_order.index(step_id)
-    except ValueError:
-        start_idx = 0
-
-    # Determine which steps to clear
-    steps_to_clear = step_order[start_idx:] if cascade else [step_id]
-
-    output_dir = get_output_dir()
-
-    for step in steps_to_clear:
-        if step == "source":
-            # Clear pages, images, extracted text
-            st.session_state.pages = None
-            st.session_state.images = []
-            st.session_state.pdf_path = None
-            if "extracted_text" in st.session_state:
-                del st.session_state.extracted_text
-            # Delete files
-            for filename in ["pages.json", "images.json", "extracted_text.txt"]:
-                filepath = os.path.join(output_dir, filename)
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-            # Delete images directory
-            images_dir = get_images_dir()
-            if os.path.exists(images_dir):
-                import shutil
-                shutil.rmtree(images_dir)
-
-        elif step == "chapters":
-            # Clear chapters and chapter texts
-            st.session_state.chapters = None
-            st.session_state.chapter_texts = {}
-            # Delete files
-            for filename in ["chapters.json", "chapter_text.json"]:
-                filepath = os.path.join(output_dir, filename)
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-
-        elif step == "questions":
-            # Clear raw questions
-            st.session_state.raw_questions = {}
-            filepath = os.path.join(output_dir, "raw_questions.json")
-            if os.path.exists(filepath):
-                os.remove(filepath)
-
-        elif step == "format":
-            # Clear formatted questions and image assignments
-            st.session_state.questions = {}
-            st.session_state.image_assignments = {}
-            for filename in ["questions_by_chapter.json", "image_assignments.json"]:
-                filepath = os.path.join(output_dir, filename)
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-
-        elif step == "qc":
-            # Clear QC progress
-            st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
-            st.session_state.qc_selected_idx = 0
-            filepath = os.path.join(output_dir, "qc_progress.json")
-            if os.path.exists(filepath):
-                os.remove(filepath)
-
-        elif step == "generate":
-            # Clear generated cloze questions
-            st.session_state.generated_questions = {"metadata": {}, "generated_cards": {}}
-            filepath = os.path.join(output_dir, "generated_questions.json")
-            if os.path.exists(filepath):
-                os.remove(filepath)
-
-        elif step == "export":
-            # Delete any exported .apkg files
-            if os.path.exists(output_dir):
-                for filename in os.listdir(output_dir):
-                    if filename.endswith(".apkg"):
-                        os.remove(os.path.join(output_dir, filename))
-
-
-def sort_chapter_keys(keys: list) -> list:
-    """Sort chapter keys naturally (ch1, ch2, ..., ch10, ch11, not ch1, ch10, ch11, ch2).
-
-    Handles keys like 'ch1', 'ch2', 'ch10', 'ch20' and sorts them numerically.
-    """
-    def extract_chapter_num(key: str) -> int:
-        match = re.match(r'ch(\d+)', key)
-        return int(match.group(1)) if match else 0
-    return sorted(keys, key=extract_chapter_num)
-
-
-def prepare_chapter_for_two_pass(ch_num: int, chapters: list[dict]) -> tuple[str, list[str]]:
-    """
-    Prepare line-numbered chapter text with inline image markers for two-pass extraction.
-
-    Args:
-        ch_num: Chapter number
-        chapters: List of all chapters (to determine page ranges)
-
-    Returns:
-        Tuple of (line_numbered_text, lines_with_images)
-        Returns (None, None) if preparation fails
-    """
-    pdf_path = st.session_state.get("source_path")
-    if not pdf_path or not os.path.exists(pdf_path):
-        return None, None
-
-    # Find chapter page range
-    ch_idx = next((i for i, ch in enumerate(chapters) if ch["chapter_number"] == ch_num), None)
-    if ch_idx is None:
-        return None, None
-
-    ch = chapters[ch_idx]
-    start_page = ch["start_page"]
-    end_page = chapters[ch_idx + 1]["start_page"] if ch_idx + 1 < len(chapters) else None
-
-    # Extract text with lines
-    pages, all_lines = extract_text_with_lines(pdf_path)
-
-    # Get chapter images
-    ch_images = [img for img in st.session_state.images
-                 if start_page <= img["page"] < (end_page or 9999)]
-
-    # Insert image markers
-    lines_with_images = insert_image_markers(all_lines, ch_images, pages)
-
-    # Build line-numbered chapter text
-    chapter_text, _ = build_chapter_text_with_lines(
-        lines_with_images, pages, start_page, end_page
-    )
-
-    return chapter_text, lines_with_images
-
-
-def question_sort_key(q_id: str) -> tuple:
-    """Sort key for question IDs."""
-    match = re.match(r'ch(\d+)_(\d+)([a-z]?)', q_id, re.IGNORECASE)
-    if match:
-        return (int(match.group(1)), int(match.group(2)), match.group(3) or "")
-    return (999, 999, q_id)
-
-
-def get_images_for_question(q_id: str) -> list[dict]:
-    """
-    Get question images (from image_files array).
-
-    Prefers questions over questions_merged to use the freshest data
-    (in case formatting was re-run).
-    """
-    # Search questions first (fresher data), then questions_merged as fallback
-    questions_to_check = []
-    for ch_key, qs in st.session_state.questions.items():
-        questions_to_check.extend(qs)
-    for ch_key, qs in st.session_state.questions_merged.items():
-        questions_to_check.extend(qs)
-
-    for q in questions_to_check:
-        if q["full_id"] == q_id:
-            q_image_files = set(q.get("image_files", []))
-            return [img for img in st.session_state.images if img["filename"] in q_image_files]
-
-    return []
-
-
-def get_answer_images_for_question(q_id: str) -> list[dict]:
-    """
-    Get answer/explanation images (from answer_image_files array).
-
-    These images should only appear in the explanation section, not with the question.
-    """
-    questions_to_check = []
-    for ch_key, qs in st.session_state.questions.items():
-        questions_to_check.extend(qs)
-    for ch_key, qs in st.session_state.questions_merged.items():
-        questions_to_check.extend(qs)
-
-    for q in questions_to_check:
-        if q["full_id"] == q_id:
-            answer_image_files = set(q.get("answer_image_files", []))
-            return [img for img in st.session_state.images if img["filename"] in answer_image_files]
-
-    return []
-
-
-def get_all_question_options() -> list[str]:
-    """Get list of all question IDs for reassignment dropdown."""
-    options = ["(none)"]
-    for ch_key in sorted(st.session_state.questions.keys(), key=lambda x: int(x[2:]) if x[2:].isdigit() else 0):
-        for q in st.session_state.questions[ch_key]:
-            options.append(q["full_id"])
-    return options
-
-
-# =============================================================================
-# Sidebar
-# =============================================================================
-
-def get_step_completion_status() -> dict[str, bool]:
-    """Check which steps are completed based on session state data."""
-    # QC is complete only when ALL questions have been reviewed
-    total_questions = sum(len(qs) for qs in st.session_state.questions.values())
-    reviewed_count = len(st.session_state.qc_progress.get("reviewed", {}))
-    qc_complete = total_questions > 0 and reviewed_count >= total_questions
-
-    # Generate step is complete when we have generated cards
-    generated_cards = st.session_state.generated_questions.get("generated_cards", {})
-    generate_complete = bool(generated_cards) and sum(len(c) for c in generated_cards.values()) > 0
-
-    return {
-        "source": st.session_state.pages is not None and len(st.session_state.pages) > 0,
-        "chapters": st.session_state.chapters is not None and len(st.session_state.chapters) > 0,
-        "questions": bool(st.session_state.get("raw_questions")) and sum(len(qs) for qs in st.session_state.raw_questions.values()) > 0,
-        "format": bool(st.session_state.questions) and sum(len(qs) for qs in st.session_state.questions.values()) > 0,
-        "qc": qc_complete,
-        "generate": generate_complete,
-        "export": False,  # Export is an action, not a state
-        "prompts": False,  # Prompts step is always accessible, not completable
-    }
-
-
-def render_sidebar():
-    """Render sidebar with navigation."""
-    st.sidebar.title("Textbook Q&A Extractor")
-
-    if st.session_state.current_pdf:
-        textbook_name = get_pdf_slug(st.session_state.current_pdf).replace('_', ' ')
-        st.sidebar.caption(f"Working on: **{textbook_name}**")
-
-    st.sidebar.markdown("---")
-
-    # Get step completion status
-    completion_status = get_step_completion_status()
-
-    # CSS for green completed step buttons
-    st.sidebar.markdown("""
-        <style>
-        /* Green styling for completed step buttons (primary type) in sidebar */
-        section[data-testid="stSidebar"] button[kind="primary"],
-        [data-testid="stSidebar"] button[kind="primary"] {
-            background-color: #28a745 !important;
-            color: white !important;
-            border-color: #28a745 !important;
-        }
-        section[data-testid="stSidebar"] button[kind="primary"]:hover,
-        [data-testid="stSidebar"] button[kind="primary"]:hover {
-            background-color: #218838 !important;
-            border-color: #1e7e34 !important;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-    steps = [
-        ("source", "1. Select Source"),
-        ("chapters", "2. Extract Chapters"),
-        ("questions", "3. Extract Questions"),
-        ("format", "4. Format Questions"),
-        ("qc", "5. QC Questions"),
-        ("generate", "6. Generate Questions"),
-        ("export", "7. Export"),
-        ("prompts", "8. Edit Prompts")
-    ]
-
-    for step_id, step_name in steps:
-        is_complete = completion_status.get(step_id, False)
-        btn_type = "primary" if is_complete else "secondary"
-
-        if st.sidebar.button(step_name, key=f"nav_{step_id}", type=btn_type):
-            st.session_state.current_step = step_id
-            save_settings()
-
-    st.sidebar.markdown("---")
-
-    # Status summary - Order: Chapters, Images, Raw Questions, Formatted, Context, QC
-    st.sidebar.subheader("Status")
-    if st.session_state.chapters:
-        st.sidebar.success(f"Chapters: {len(st.session_state.chapters)}")
-    else:
-        st.sidebar.info("Chapters: Not extracted")
-
-    img_count = len(st.session_state.images)
-    if img_count > 0:
-        assigned = len(st.session_state.image_assignments)
-        st.sidebar.success(f"Images: {img_count} ({assigned} assigned)")
-    else:
-        st.sidebar.info("Images: Not extracted")
-
-    raw_q_count = sum(len(qs) for qs in st.session_state.get("raw_questions", {}).values())
-    if raw_q_count > 0:
-        st.sidebar.success(f"Raw Q&A: {raw_q_count}")
-    else:
-        st.sidebar.info("Raw Q&A: Not extracted")
-
-    q_count = sum(len(qs) for qs in st.session_state.questions.values())
-    if q_count > 0:
-        st.sidebar.success(f"Formatted: {q_count}")
-    else:
-        st.sidebar.info("Formatted: Not done")
-
-    merged_count = sum(len(qs) for qs in st.session_state.questions_merged.values())
-    if merged_count > 0:
-        st.sidebar.success(f"Context: Associated")
-    else:
-        st.sidebar.info("Context: Not associated")
-
-    reviewed = len(st.session_state.qc_progress.get("reviewed", {}))
-    if reviewed > 0:
-        st.sidebar.success(f"QC'd: {reviewed}/{q_count}")
+# Import from modular ui package
+from ui.helpers import (
+    play_completion_sound,
+    build_block_aware_image_assignments,
+    get_selected_model_id,
+    clear_step_data,
+    sort_chapter_keys,
+    question_sort_key,
+    get_images_for_question,
+    get_answer_images_for_question,
+    get_all_question_options,
+)
+from ui.sidebar import render_sidebar
+
+# Note: Helper functions and sidebar are now in ui/helpers.py and ui/sidebar.py
+# They are imported above from the ui package
 
 
 # =============================================================================
 # Step 1: Source Selection
 # =============================================================================
 
-def run_feeling_lucky(pdf_path: str, models: dict, workers: dict):
-    """Run all steps automatically from PDF loading through question formatting.
-
-    Args:
-        pdf_path: Path to the PDF file
-        models: Dict with model names for each step: 'chapters', 'questions', 'format'
-        workers: Dict with worker counts for parallel steps: 'questions', 'format'
-    """
-    client = get_anthropic_client()
-    logger = get_extraction_logger()
-
-    # Step 1: Load PDF
-    st.markdown("### Step 1: Loading PDF...")
-    progress_step1 = st.progress(0)
-
-    progress_step1.progress(20, "Extracting images...")
-    st.session_state.images = extract_images_from_pdf(pdf_path, get_images_dir())
-    save_images()
-
-    progress_step1.progress(50, "Extracting text...")
-    pages, all_lines = extract_text_with_lines(pdf_path)
-    st.session_state.pages = pages
-    st.session_state.pdf_path = pdf_path
-    save_pages()
-
-    progress_step1.progress(70, "Inserting image markers...")
-    lines_with_markers = insert_image_markers(all_lines, st.session_state.images, pages)
-
-    numbered_lines = []
-    line_num = 1
-    for line in lines_with_markers:
-        if line.startswith("[IMAGE:"):
-            numbered_lines.append(line)
-        else:
-            numbered_lines.append(f"[LINE:{line_num:06d}] {line}")
-            line_num += 1
-
-    full_text = "\n".join(numbered_lines)
-    st.session_state.extracted_text = full_text
-
-    output_dir = get_output_dir()
-    text_file_path = os.path.join(output_dir, "extracted_text.txt")
-    with open(text_file_path, "w", encoding="utf-8") as f:
-        f.write(full_text)
-
-    progress_step1.progress(100, "PDF loaded!")
-    st.success(f"Step 1 complete: {len(pages)} pages, {len(st.session_state.images)} images")
-
-    # Step 2: Extract Chapters
-    st.markdown("### Step 2: Extracting Chapters...")
-    progress_step2 = st.progress(0)
-
-    chapters_model_id = get_model_id(models['chapters'])
-    progress_step2.progress(30, f"Identifying chapter boundaries with {models['chapters']}...")
-    chapters = identify_chapters_llm(client, pages, chapters_model_id)
-
-    if chapters:
-        chapters = sorted(chapters, key=lambda ch: ch.get("chapter_number", 0))
-        st.session_state.chapters = chapters
-
-        # Extract chapter texts
-        for i, ch in enumerate(chapters):
-            start_page = ch["start_page"]
-            end_page = chapters[i + 1]["start_page"] if i + 1 < len(chapters) else None
-            ch_key = f"ch{ch['chapter_number']}"
-            st.session_state.chapter_texts[ch_key] = extract_chapter_text(pages, start_page, end_page)
-
-        save_chapters()
-
-        # Assign chapters to images
-        if st.session_state.images:
-            st.session_state.images = assign_chapters_to_images(st.session_state.images, chapters)
-            save_images()
-
-        progress_step2.progress(100, "Chapters extracted!")
-        st.success(f"Step 2 complete: {len(chapters)} chapters found")
-    else:
-        st.error("No chapters found!")
-        return False
-
-    # Step 3: Extract Questions (Raw)
-    st.markdown("### Step 3: Extracting Questions...")
-    progress_step3 = st.progress(0)
-
-    questions_model_id = get_model_id(models['questions'])
-
-    # Use the raw lines with image markers (without line prefixes) from Step 1
-    # build_chapter_text_with_lines will add line prefixes
-    lines_with_images = lines_with_markers
-
-    chapters = st.session_state.chapters
-    total_chapters = len(chapters)
-    results = {}
-
-    # Define extract_chapter_questions inline for this context
-    def extract_chapter_questions(ch_idx):
-        chapter = chapters[ch_idx]
-        ch_num = chapter.get("chapter_number", ch_idx + 1)
-        ch_key = f"ch{ch_num}"
-
-        start_page = chapter["start_page"]
-        end_page = chapters[ch_idx + 1]["start_page"] if ch_idx + 1 < len(chapters) else None
-
-        # Build chapter text with line numbers
-        ch_text, line_mapping = build_chapter_text_with_lines(
-            lines_with_images, pages, start_page, end_page
-        )
-
-        if not ch_text.strip():
-            return ch_key, []
-
-        # Extract line ranges using LLM
-        try:
-            line_ranges = extract_line_ranges_llm(client, ch_num, ch_text, questions_model_id)
-        except Exception as e:
-            logger.error(f"Error extracting {ch_key}: {e}")
-            return ch_key, []
-
-        if not line_ranges:
-            return ch_key, []
-
-        # Extract raw text for each question
-        raw_questions = []
-        for lr in line_ranges:
-            q_id = lr.get("question_id", "?")
-            q_start = lr.get("question_start", 0)
-            q_end = lr.get("question_end", 0)
-            a_start = lr.get("answer_start", 0)
-            a_end = lr.get("answer_end", 0)
-
-            if not all([q_start, q_end]):
-                continue
-
-            q_text = extract_lines_by_range_mapped(lines_with_images, q_start, q_end, line_mapping) if q_start > 0 else ""
-            a_text = extract_lines_by_range_mapped(lines_with_images, a_start, a_end, line_mapping) if a_start > 0 else ""
-
-            # Get images from the LLM's response
-            image_files = lr.get("image_files", [])
-
-            raw_questions.append({
-                "question_id": q_id,
-                "local_id": q_id,
-                "full_id": f"{ch_key}_{q_id}",
-                "chapter": ch_num,
-                "question_text": q_text,
-                "answer_text": a_text,
-                "image_files": image_files,
-                "correct_letter": lr.get("correct_letter", "")
-            })
-
-        return ch_key, raw_questions
-
-    # Process chapters in parallel
-    questions_max_workers = workers.get('questions', 10)
-    completed = 0
-
-    with ThreadPoolExecutor(max_workers=questions_max_workers) as executor:
-        futures = {executor.submit(extract_chapter_questions, idx): idx for idx in range(total_chapters)}
-
-        for future in as_completed(futures):
-            idx = futures[future]
-            ch_num = chapters[idx].get("chapter_number", idx + 1)
-
-            try:
-                ch_key, raw_questions = future.result()
-                if raw_questions:
-                    results[ch_key] = raw_questions
-                    # Save incrementally
-                    st.session_state.raw_questions = results
-                    save_raw_questions()
-            except Exception as e:
-                logger.error(f"Error extracting chapter {ch_num}: {e}")
-
-            completed += 1
-            progress_step3.progress(completed / total_chapters, f"Extracted {completed}/{total_chapters} chapters...")
-
-    st.session_state.raw_questions = results
-    save_raw_questions()
-
-    total_raw = sum(len(qs) for qs in results.values())
-    progress_step3.progress(100, "Questions extracted!")
-    st.success(f"Step 3 complete: {total_raw} raw Q&A pairs from {len(results)} chapters")
-
-    # Step 4: Format Questions
-    st.markdown("### Step 4: Formatting Questions...")
-    progress_step4 = st.progress(0)
-
-    format_model_id = get_model_id(models['format'])
-    format_max_workers = workers.get('format', 10)
-
-    raw_questions = st.session_state.raw_questions
-    formatted_questions = {}
-    total_questions = sum(len(qs) for qs in raw_questions.values())
-
-    # Build flat list of all questions with chapter keys
-    all_raw = []
-    for ch_key in sort_chapter_keys(list(raw_questions.keys())):
-        for rq in raw_questions[ch_key]:
-            all_raw.append((ch_key, rq))
-
-    def format_single(item):
-        ch_key, rq = item
-        try:
-            formatted = format_qa_pair_llm(
-                client,
-                rq["local_id"],
-                rq["question_text"],
-                rq["answer_text"],
-                format_model_id,
-                rq["chapter"]
-            )
-            formatted["full_id"] = rq["full_id"]
-            formatted["local_id"] = rq["local_id"]
-            formatted["image_files"] = rq["image_files"]
-            if not formatted.get("correct_answer") and rq.get("correct_letter"):
-                formatted["correct_answer"] = rq["correct_letter"]
-            return ch_key, formatted
-        except Exception as e:
-            logger.error(f"Error formatting {rq['full_id']}: {e}")
-            return ch_key, {
-                "full_id": rq["full_id"],
-                "local_id": rq["local_id"],
-                "text": rq["question_text"],
-                "choices": {},
-                "correct_answer": rq.get("correct_letter", ""),
-                "explanation": rq["answer_text"],
-                "image_files": rq["image_files"],
-                "error": str(e)
-            }
-
-    processed = 0
-    with ThreadPoolExecutor(max_workers=format_max_workers) as executor:
-        futures = {executor.submit(format_single, item): item for item in all_raw}
-
-        for future in as_completed(futures):
-            try:
-                ch_key, formatted = future.result()
-                if ch_key not in formatted_questions:
-                    formatted_questions[ch_key] = []
-                formatted_questions[ch_key].append(formatted)
-            except Exception as e:
-                ch_key, rq = futures[future]
-                logger.error(f"Error formatting {rq['full_id']}: {e}")
-
-            processed += 1
-            progress_step4.progress(processed / total_questions, f"Formatted {processed}/{total_questions} questions...")
-
-            # Save incrementally every 10 questions
-            if processed % 10 == 0:
-                st.session_state.questions = formatted_questions
-                save_questions()
-
-    # Sort questions within each chapter
-    for ch_key in formatted_questions:
-        formatted_questions[ch_key].sort(key=lambda q: question_sort_key(q["full_id"]))
-
-    st.session_state.questions = formatted_questions
-    save_questions()
-
-    # Build image assignments with block-aware context inheritance
-    # (assigns shared images to first sub-question, sets context_from on others)
-    st.session_state.image_assignments = build_block_aware_image_assignments(formatted_questions)
-    st.session_state.questions = formatted_questions  # context_from was set by helper
-    save_questions()
-    save_image_assignments()
-
-    total_formatted = sum(len(qs) for qs in formatted_questions.values())
-    progress_step4.progress(100, "Questions formatted!")
-    st.success(f"Step 4 complete: {total_formatted} formatted Q&A pairs")
-
-    # Play completion sound
-    play_completion_sound()
-
-    return True
-
-
 def render_source_step():
     """Render source PDF selection step."""
-
-    # Check if we're in "feeling lucky" mode
-    if st.session_state.get("feeling_lucky_mode"):
-        st.header("I'm Feeling Lucky - Automatic Processing")
-
-        selected_pdf = st.session_state.get("feeling_lucky_pdf")
-        pdf_path = st.session_state.get("feeling_lucky_pdf_path")
-
-        st.info(f"Selected PDF: {selected_pdf}")
-
-        # Model selection for each step
-        model_options = get_model_options()
-
-        default_idx = 0
-        if st.session_state.selected_model in model_options:
-            default_idx = model_options.index(st.session_state.selected_model)
-
-        st.markdown("**Select model and parallel workers for each step:**")
-
-        # Step 2: Chapters (no parallelization)
-        st.markdown("##### Step 2 - Extract Chapters")
-        chapters_model = st.selectbox(
-            "Model:",
-            model_options,
-            index=default_idx,
-            key="lucky_chapters_model"
-        )
-
-        # Step 3: Questions (parallel by chapter)
-        st.markdown("##### Step 3 - Extract Questions")
-        col3a, col3b = st.columns([3, 1])
-        with col3a:
-            questions_model = st.selectbox(
-                "Model:",
-                model_options,
-                index=default_idx,
-                key="lucky_questions_model"
-            )
-        with col3b:
-            questions_workers = st.number_input(
-                "Workers:",
-                min_value=1,
-                max_value=50,
-                value=20,
-                key="lucky_questions_workers",
-                help="Parallel chapters to process"
-            )
-
-        # Step 4: Format (parallel by question)
-        st.markdown("##### Step 4 - Format Questions")
-        col4a, col4b = st.columns([3, 1])
-        with col4a:
-            format_model = st.selectbox(
-                "Model:",
-                model_options,
-                index=default_idx,
-                key="lucky_format_model"
-            )
-        with col4b:
-            format_workers = st.number_input(
-                "Workers:",
-                min_value=1,
-                max_value=50,
-                value=50,
-                key="lucky_format_workers",
-                help="Parallel questions to format"
-            )
-
-        st.markdown("---")
-
-        btn_col1, btn_col2 = st.columns(2)
-
-        with btn_col1:
-            if st.button("Start Automatic Processing", type="primary"):
-                # Clear any existing data and start fresh
-                st.session_state.current_pdf = selected_pdf
-                clear_session_data()
-                reset_logger()
-
-                models = {
-                    'chapters': chapters_model,
-                    'questions': questions_model,
-                    'format': format_model
-                }
-                workers = {
-                    'questions': questions_workers,
-                    'format': format_workers
-                }
-
-                success = run_feeling_lucky(pdf_path, models, workers)
-
-                if success:
-                    st.balloons()
-                    st.success("All steps completed! Ready for QC.")
-                    st.session_state.feeling_lucky_mode = False
-                    st.session_state.current_step = "qc"
-                    save_settings()
-                    st.rerun()
-
-        with btn_col2:
-            if st.button("Cancel", type="secondary"):
-                st.session_state.feeling_lucky_mode = False
-                st.rerun()
-
-        return
-
     col1, col2 = st.columns([4, 1])
     with col1:
         st.header("Step 1: Select Source PDF")
@@ -914,7 +120,7 @@ def render_source_step():
 
         has_existing_data = output_slug in available_textbooks
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
 
         with col1:
             btn_label = "Load PDF (Fresh Start)" if has_existing_data else "Load PDF"
@@ -979,13 +185,6 @@ def render_source_step():
                     st.success("Loaded previous session data")
                     st.rerun()
 
-        with col3:
-            if st.button("I'm Feeling Lucky", type="secondary", help="Run all steps automatically up to QC"):
-                st.session_state.feeling_lucky_mode = True
-                st.session_state.feeling_lucky_pdf = selected_pdf
-                st.session_state.feeling_lucky_pdf_path = pdf_path
-                st.rerun()
-
         if st.session_state.pages:
             st.success(f"PDF loaded: {len(st.session_state.pages)} pages, {len(st.session_state.images)} images")
             st.markdown("**Next:** Go to 'Extract Chapters' to identify chapter boundaries.")
@@ -1044,7 +243,7 @@ def render_chapters_step():
         return
 
     if has_pages:
-        col1, col2, col3 = st.columns([2, 2, 1])
+        col1, col2 = st.columns(2)
 
         with col1:
             model_options = get_model_options()
@@ -1712,33 +911,6 @@ def render_format_step():
 
         return ch_key, questions, formatted_block
 
-    # Helper function to format a single question (legacy)
-    def format_single(item):
-        ch_key, rq = item
-        ch_num = rq["chapter"]
-        formatted = format_qa_pair_llm(
-            client,
-            rq["local_id"],
-            rq["question_text"],
-            rq["answer_text"],
-            model_id,
-            ch_num
-        )
-        # Add metadata
-        formatted["full_id"] = rq["full_id"]
-        formatted["local_id"] = rq["local_id"]
-        formatted["image_files"] = rq["image_files"]
-        # Preserve block_id if present (from block extraction)
-        if rq.get("block_id"):
-            formatted["block_id"] = rq["block_id"]
-        # Preserve is_context_only flag if present
-        if rq.get("is_context_only"):
-            formatted["is_context_only"] = rq["is_context_only"]
-        # Use correct_letter from extraction if LLM didn't find it
-        if not formatted.get("correct_answer") and rq.get("correct_letter"):
-            formatted["correct_answer"] = rq["correct_letter"]
-        return ch_key, formatted
-
     with btn_col1:
         if has_v2_blocks:
             format_chapter = st.button(
@@ -1810,38 +982,8 @@ def render_format_step():
                 save_raw_questions()
 
             else:
-                # Legacy question-based formatting
-                ch_raw = [(selected_ch_key, rq) for rq in ch_raw_questions]
-                total = len(ch_raw)
-                status_text.text(f"Formatting {total} Q&A pairs from Chapter {selected_ch_num}...")
-
-                formatted_list = []
-                completed = 0
-
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {executor.submit(format_single, item): item for item in ch_raw}
-
-                    for future in as_completed(futures):
-                        try:
-                            ch_key, formatted = future.result()
-                            formatted_list.append(formatted)
-                        except Exception as e:
-                            ch_key, rq = futures[future]
-                            logger.error(f"Error formatting {rq['full_id']}: {e}")
-                            formatted_list.append({
-                                "full_id": rq["full_id"],
-                                "local_id": rq["local_id"],
-                                "text": rq["question_text"],
-                                "choices": {},
-                                "correct_answer": rq.get("correct_letter", ""),
-                                "explanation": rq["answer_text"],
-                                "image_files": rq["image_files"],
-                                "error": str(e)
-                            })
-
-                        completed += 1
-                        progress_bar.progress(completed / total)
-                        status_text.text(f"Chapter {selected_ch_num}: {completed}/{total} formatted...")
+                st.warning("No v2 blocks available. Please extract questions first (Step 3).")
+                st.rerun()
 
             # Sort and save
             formatted_list.sort(key=lambda q: question_sort_key(q["full_id"]))
@@ -1921,51 +1063,8 @@ def render_format_step():
             save_raw_questions()
 
         else:
-            # Legacy question-based formatting
-            all_raw = []
-            for ch_key, ch_raw in raw_questions.items():
-                for rq in ch_raw:
-                    all_raw.append((ch_key, rq))
-
-            total = len(all_raw)
-            status_text.text(f"Formatting {total} Q&A pairs with {max_workers} parallel workers...")
-
-            formatted_by_chapter = {}
-            completed = 0
-
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(format_single, item): item for item in all_raw}
-
-                for future in as_completed(futures):
-                    try:
-                        ch_key, formatted = future.result()
-                        if ch_key not in formatted_by_chapter:
-                            formatted_by_chapter[ch_key] = []
-                        formatted_by_chapter[ch_key].append(formatted)
-                    except Exception as e:
-                        ch_key, rq = futures[future]
-                        logger.error(f"Error formatting {rq['full_id']}: {e}")
-                        if ch_key not in formatted_by_chapter:
-                            formatted_by_chapter[ch_key] = []
-                        formatted_by_chapter[ch_key].append({
-                            "full_id": rq["full_id"],
-                            "local_id": rq["local_id"],
-                            "text": rq["question_text"],
-                            "choices": {},
-                            "correct_answer": rq.get("correct_letter", ""),
-                            "explanation": rq["answer_text"],
-                            "image_files": rq["image_files"],
-                            "error": str(e)
-                        })
-
-                    completed += 1
-                    progress_bar.progress(completed / total)
-                    status_text.text(f"Formatted {completed}/{total} Q&A pairs...")
-
-                    # Save incrementally every 10 questions
-                    if completed % 10 == 0:
-                        st.session_state.questions = formatted_by_chapter
-                        save_questions()
+            st.warning("No v2 blocks available. Please extract questions first (Step 3).")
+            st.rerun()
 
         # Sort questions within each chapter
         for ch_key in formatted_by_chapter:
