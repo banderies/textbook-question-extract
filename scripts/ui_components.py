@@ -34,7 +34,7 @@ from llm_extraction import (
     get_anthropic_client, get_model_options, get_model_id,
     identify_chapters_llm, extract_qa_pairs_llm, process_chapter_extraction,
     extract_line_ranges_llm, format_qa_pair_llm,
-    match_images_to_questions_llm, associate_context_llm, add_page_numbers_to_questions,
+    match_images_to_questions_llm, add_page_numbers_to_questions,
     load_prompts, save_prompts, reload_prompts, get_prompt, stream_message,
     get_extraction_logger, get_log_file_path, reset_logger,
     generate_cloze_cards_from_block_llm,
@@ -152,11 +152,11 @@ def clear_step_data(step_id: str, cascade: bool = True):
     """Clear data for a specific step and all subsequent steps, allowing re-run from that point.
 
     Args:
-        step_id: One of 'source', 'chapters', 'questions', 'format', 'context', 'qc', 'generate', 'export'
+        step_id: One of 'source', 'chapters', 'questions', 'format', 'qc', 'generate', 'export'
         cascade: If True, also clear all subsequent steps (default True)
     """
     # Define step order for cascading
-    step_order = ["source", "chapters", "questions", "format", "context", "qc", "generate", "export"]
+    step_order = ["source", "chapters", "questions", "format", "qc", "generate", "export"]
 
     # Find the index of the current step
     try:
@@ -210,15 +210,6 @@ def clear_step_data(step_id: str, cascade: bool = True):
             st.session_state.questions = {}
             st.session_state.image_assignments = {}
             for filename in ["questions_by_chapter.json", "image_assignments.json"]:
-                filepath = os.path.join(output_dir, filename)
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-
-        elif step == "context":
-            # Clear merged questions and assignments
-            st.session_state.questions_merged = {}
-            st.session_state.image_assignments_merged = {}
-            for filename in ["questions_merged.json", "image_assignments_merged.json"]:
                 filepath = os.path.join(output_dir, filename)
                 if os.path.exists(filepath):
                     os.remove(filepath)
@@ -313,7 +304,7 @@ def get_images_for_question(q_id: str) -> list[dict]:
     Get question images (from image_files array).
 
     Prefers questions over questions_merged to use the freshest data
-    (in case Step 4 was re-run after Step 5).
+    (in case formatting was re-run).
     """
     # Search questions first (fresher data), then questions_merged as fallback
     questions_to_check = []
@@ -379,7 +370,6 @@ def get_step_completion_status() -> dict[str, bool]:
         "chapters": st.session_state.chapters is not None and len(st.session_state.chapters) > 0,
         "questions": bool(st.session_state.get("raw_questions")) and sum(len(qs) for qs in st.session_state.raw_questions.values()) > 0,
         "format": bool(st.session_state.questions) and sum(len(qs) for qs in st.session_state.questions.values()) > 0,
-        "context": bool(st.session_state.questions_merged) and sum(len(qs) for qs in st.session_state.questions_merged.values()) > 0,
         "qc": qc_complete,
         "generate": generate_complete,
         "export": False,  # Export is an action, not a state
@@ -423,11 +413,10 @@ def render_sidebar():
         ("chapters", "2. Extract Chapters"),
         ("questions", "3. Extract Questions"),
         ("format", "4. Format Questions"),
-        ("context", "5. Associate Context"),
-        ("qc", "6. QC Questions"),
-        ("generate", "7. Generate Questions"),
-        ("export", "8. Export"),
-        ("prompts", "9. Edit Prompts")
+        ("qc", "5. QC Questions"),
+        ("generate", "6. Generate Questions"),
+        ("export", "7. Export"),
+        ("prompts", "8. Edit Prompts")
     ]
 
     for step_id, step_name in steps:
@@ -482,12 +471,12 @@ def render_sidebar():
 # =============================================================================
 
 def run_feeling_lucky(pdf_path: str, models: dict, workers: dict):
-    """Run all steps automatically from PDF loading through context association.
+    """Run all steps automatically from PDF loading through question formatting.
 
     Args:
         pdf_path: Path to the PDF file
-        models: Dict with model names for each step: 'chapters', 'questions', 'format', 'context'
-        workers: Dict with worker counts for parallel steps: 'questions', 'format', 'context'
+        models: Dict with model names for each step: 'chapters', 'questions', 'format'
+        workers: Dict with worker counts for parallel steps: 'questions', 'format'
     """
     client = get_anthropic_client()
     logger = get_extraction_logger()
@@ -751,161 +740,6 @@ def run_feeling_lucky(pdf_path: str, models: dict, workers: dict):
     progress_step4.progress(100, "Questions formatted!")
     st.success(f"Step 4 complete: {total_formatted} formatted Q&A pairs")
 
-    # Step 5: Associate Context
-    st.markdown("### Step 5: Associating Context...")
-    progress_step5 = st.progress(0)
-
-    context_model_id = get_model_id(models['context'])
-    context_max_workers = workers.get('context', 10)
-
-    questions_copy = copy.deepcopy(st.session_state.questions)
-    assignments_copy = copy.deepcopy(st.session_state.image_assignments)
-
-    total_chapters = len(questions_copy)
-
-    # Worker function for parallel context association
-    def process_chapter_context(ch_key: str, ch_questions: list) -> tuple:
-        """Process context for one chapter. Returns (ch_key, updated_questions, ch_stats)."""
-        ch_stats = {"context_questions_found": 0, "sub_questions_updated": 0, "images_copied": 0}
-
-        if not ch_questions:
-            return ch_key, ch_questions, ch_stats
-
-        # Build summary for LLM with rich context
-        questions_summary = []
-        for q in ch_questions:
-            choices = q.get("choices", {})
-            has_choices = bool(choices)
-            summary = {
-                "full_id": q["full_id"],
-                "local_id": q["local_id"],
-                "text_preview": q["text"][:300] + "..." if len(q["text"]) > 300 else q["text"],
-                "has_choices": has_choices,
-                "num_choices": len(choices),
-                "has_correct_answer": bool(q.get("correct_answer")),
-                "has_explanation": bool(q.get("explanation"))
-            }
-            questions_summary.append(summary)
-
-        prompt = get_prompt("associate_context",
-                           questions_summary=json.dumps(questions_summary, indent=2))
-
-        try:
-            response_text, usage = stream_message(
-                client,
-                context_model_id,
-                messages=[{"role": "user", "content": prompt}]
-            )
-
-            logger.info(f"Context association {ch_key}: input={usage['input_tokens']:,}, output={usage['output_tokens']:,}")
-
-            if "```" in response_text:
-                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
-                if match:
-                    response_text = match.group(1)
-
-            result = json.loads(response_text)
-            mappings = result.get("context_mappings", [])
-
-            question_by_id = {q["full_id"]: q for q in ch_questions}
-
-            for mapping in mappings:
-                context_id = mapping.get("context_id")
-                sub_ids = mapping.get("sub_question_ids", [])
-
-                if not context_id or context_id not in question_by_id:
-                    continue
-
-                context_q = question_by_id[context_id]
-
-                # Only validation: filter out self-references (question inheriting from itself)
-                sub_ids = [sid for sid in sub_ids if sid != context_id]
-                if not sub_ids:
-                    continue
-
-                context_text = context_q.get("text", "").strip()
-                context_q["is_context_only"] = True
-                ch_stats["context_questions_found"] += 1
-
-                # Count context images
-                context_images = [img for img, assigned_to in assignments_copy.items() if assigned_to == context_id]
-                ch_stats["images_copied"] += len(context_images)
-
-                for sub_id in sub_ids:
-                    if sub_id not in question_by_id:
-                        continue
-                    sub_q = question_by_id[sub_id]
-                    if sub_q.get("context_merged"):
-                        continue
-                    original_text = sub_q.get("text", "").strip()
-                    sub_q["text"] = f"{context_text} {original_text}"
-                    sub_q["context_merged"] = True
-                    sub_q["context_from"] = context_id
-                    sub_q["is_context_only"] = False
-                    ch_stats["sub_questions_updated"] += 1
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Context association {ch_key}: JSON parse error - {e}")
-        except Exception as e:
-            logger.error(f"Context association {ch_key}: API error - {type(e).__name__}: {e}")
-
-        # Ensure all questions have is_context_only set
-        for q in ch_questions:
-            if "is_context_only" not in q:
-                q["is_context_only"] = False
-
-        return ch_key, ch_questions, ch_stats
-
-    # Process chapters in parallel
-    completed = 0
-    updated_questions = {}
-    total_stats = {"context_questions_found": 0, "sub_questions_updated": 0, "images_copied": 0}
-
-    with ThreadPoolExecutor(max_workers=context_max_workers) as executor:
-        future_to_ch = {
-            executor.submit(process_chapter_context, ch_key, ch_questions): ch_key
-            for ch_key, ch_questions in questions_copy.items()
-        }
-
-        for future in as_completed(future_to_ch):
-            ch_key = future_to_ch[future]
-            try:
-                result_ch_key, result_questions, ch_stats = future.result()
-                updated_questions[result_ch_key] = result_questions
-                for key in total_stats:
-                    total_stats[key] += ch_stats[key]
-                # Save incrementally after each chapter completes
-                st.session_state.questions_merged[result_ch_key] = result_questions
-                save_questions_merged()
-            except Exception as e:
-                logger.error(f"Context association {ch_key}: Failed - {e}")
-                updated_questions[ch_key] = questions_copy[ch_key]
-
-            completed += 1
-            progress_step5.progress(completed / total_chapters, f"Context: {completed}/{total_chapters} chapters...")
-
-    st.session_state.questions_merged = updated_questions
-    st.session_state.image_assignments_merged = assignments_copy
-
-    # Detect page numbers for merged questions
-    if st.session_state.pages and st.session_state.chapters:
-        add_page_numbers_to_questions(
-            st.session_state.questions_merged,
-            st.session_state.pages,
-            st.session_state.chapters
-        )
-
-    save_questions_merged()
-    save_image_assignments_merged()
-
-    progress_step5.progress(100, "Context associated!")
-    st.success(
-        f"Step 5 complete: Context association finished\n\n"
-        f"- Context questions found: {total_stats['context_questions_found']}\n"
-        f"- Sub-questions updated: {total_stats['sub_questions_updated']}\n"
-        f"- Images copied: {total_stats['images_copied']}"
-    )
-
     # Play completion sound
     play_completion_sound()
 
@@ -982,26 +816,6 @@ def render_source_step():
                 help="Parallel questions to format"
             )
 
-        # Step 5: Context (parallel by chapter)
-        st.markdown("##### Step 5 - Associate Context")
-        col5a, col5b = st.columns([3, 1])
-        with col5a:
-            context_model = st.selectbox(
-                "Model:",
-                model_options,
-                index=default_idx,
-                key="lucky_context_model"
-            )
-        with col5b:
-            context_workers = st.number_input(
-                "Workers:",
-                min_value=1,
-                max_value=50,
-                value=50,
-                key="lucky_context_workers",
-                help="Parallel chapters to process"
-            )
-
         st.markdown("---")
 
         btn_col1, btn_col2 = st.columns(2)
@@ -1016,13 +830,11 @@ def render_source_step():
                 models = {
                     'chapters': chapters_model,
                     'questions': questions_model,
-                    'format': format_model,
-                    'context': context_model
+                    'format': format_model
                 }
                 workers = {
                     'questions': questions_workers,
-                    'format': format_workers,
-                    'context': context_workers
+                    'format': format_workers
                 }
 
                 success = run_feeling_lucky(pdf_path, models, workers)
@@ -2177,7 +1989,7 @@ def render_format_step():
         status_text.text("Done!")
         st.success(f"Formatted {total} {'blocks' if has_v2_blocks else 'Q&A pairs'}")
         play_completion_sound()
-        st.info("**Next:** Go to **Step 5: Associate Context** to link context questions to sub-questions.")
+        st.info("**Next:** Go to **Step 5: QC Questions** to review and approve extracted questions.")
         st.rerun()
 
     # Display formatted questions if available
@@ -2238,629 +2050,21 @@ def render_format_step():
 
 
 # =============================================================================
-# Step 5: Associate Context
-# =============================================================================
-
-def render_context_step():
-    """Render context association step."""
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        st.header("Step 5: Associate Context")
-    with col2:
-        if st.button("Reset To This Step", key="clear_context", type="secondary", help="Clear this step and all subsequent steps"):
-            clear_step_data("context")
-            st.success("Context and subsequent data cleared")
-            st.rerun()
-
-    if not st.session_state.questions:
-        st.warning("Please format questions first (Step 4)")
-        return
-
-    # Check if block data is available
-    question_blocks = st.session_state.get("question_blocks", {})
-    has_blocks = bool(question_blocks) and any(question_blocks.values())
-
-    if has_blocks:
-        total_blocks = sum(len(bs) for bs in question_blocks.values())
-        total_sub_q = sum(sum(len(b.get("sub_questions", [])) for b in bs) for bs in question_blocks.values())
-        st.success(f"Block data available: {total_blocks} blocks with {total_sub_q} sub-questions. "
-                   "Context has already been captured at block level during extraction.")
-        st.markdown("""
-        **Block Extraction Advantage:**
-        - Context text is already associated with each sub-question
-        - Shared discussion/answer text is captured for all sub-questions in the block
-        - No additional LLM call needed for context association
-        """)
-    else:
-        st.markdown("""
-        This step identifies **context-only questions** (clinical scenarios without answer choices)
-        and associates their text and images with the related sub-questions.
-
-        **Example:**
-        - Q1 contains a clinical scenario and image (no answer choices)
-        - Q1a, Q1b, Q1c are the actual questions with choices
-        - After association, Q1's text is prepended to Q1a/Q1b/Q1c and images are linked
-        """)
-
-    # Count questions and pre-extracted context
-    context_only_count = 0
-    pre_extracted_context_count = 0
-    total_questions = 0
-    for ch_key, ch_questions in st.session_state.questions.items():
-        for q in ch_questions:
-            total_questions += 1
-            if not q.get("choices"):
-                context_only_count += 1
-            if q.get("context_source"):
-                pre_extracted_context_count += 1
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Questions", total_questions)
-    with col2:
-        st.metric("Questions Without Choices", context_only_count)
-    with col3:
-        st.metric("Pre-extracted Context Links", pre_extracted_context_count,
-                  help="Questions with context_source already identified during extraction")
-
-    # Controls section
-    st.markdown("---")
-
-    # Show different options based on whether context was pre-extracted
-    if pre_extracted_context_count > 0:
-        st.success(f"Context relationships were detected during extraction for {pre_extracted_context_count} questions.")
-        st.markdown("You can apply these directly without an additional LLM call, or run the LLM to re-analyze.")
-
-        ctrl_col1, ctrl_col2 = st.columns(2)
-        with ctrl_col1:
-            apply_extracted = st.button("Apply Extracted Context", type="primary",
-                                        help="Use context_source from extraction (no LLM call)")
-        with ctrl_col2:
-            run_context_association = st.button("Run LLM Association",
-                                                help="Re-analyze with LLM (ignores pre-extracted)")
-
-        # LLM options (collapsed by default since extracted is preferred)
-        with st.expander("LLM Association Options", expanded=False):
-            llm_col1, llm_col2 = st.columns(2)
-            with llm_col1:
-                model_options = get_model_options()
-                current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
-                selected_model = st.selectbox("Model:", model_options, index=current_idx, key="context_model")
-                if selected_model != st.session_state.selected_model:
-                    st.session_state.selected_model = selected_model
-                    save_settings()
-            with llm_col2:
-                context_workers = st.number_input(
-                    "Parallel workers:",
-                    min_value=1,
-                    max_value=50,
-                    value=50,
-                    help="Number of chapters to process in parallel",
-                    key="context_workers"
-                )
-    else:
-        st.info("No context relationships were detected during extraction. Run LLM association to identify them.")
-        apply_extracted = False
-
-        ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1.5, 2])
-
-        with ctrl_col1:
-            model_options = get_model_options()
-            current_idx = model_options.index(st.session_state.selected_model) if st.session_state.selected_model in model_options else 0
-            selected_model = st.selectbox("Model:", model_options, index=current_idx, key="context_model")
-            if selected_model != st.session_state.selected_model:
-                st.session_state.selected_model = selected_model
-                save_settings()
-
-        with ctrl_col2:
-            context_workers = st.number_input(
-                "Parallel workers:",
-                min_value=1,
-                max_value=50,
-                value=50,
-                help="Number of chapters to process in parallel",
-                key="context_workers"
-            )
-
-        with ctrl_col3:
-            run_context_association = st.button("Associate Context", type="primary")
-
-    st.markdown("---")
-
-    # Preview potential context-only questions (before association)
-    if context_only_count > 0:
-        potential_context = []
-        for ch_key in sort_chapter_keys(st.session_state.questions.keys()):
-            for q in st.session_state.questions[ch_key]:
-                if not q.get("choices"):
-                    potential_context.append((ch_key, q))
-
-        with st.expander(f"Context-Only Questions Preview ({len(potential_context)} questions)", expanded=False):
-            # Chapter filter for context questions
-            context_chapters = sorted(set(ch_key for ch_key, _ in potential_context),
-                                      key=lambda x: int(x.replace("ch", "")))
-            filter_col1, filter_col2 = st.columns([1, 3])
-            with filter_col1:
-                ctx_chapter_filter = st.selectbox(
-                    "Filter by chapter:",
-                    ["All chapters"] + context_chapters,
-                    key="ctx_preview_chapter_filter"
-                )
-
-            # Filter questions by chapter
-            filtered_context = [(ch, q) for ch, q in potential_context
-                               if ctx_chapter_filter == "All chapters" or ch == ctx_chapter_filter]
-
-            st.caption(f"Showing {len(filtered_context)} of {len(potential_context)} context questions")
-
-            # Display each context question in a card-like format
-            for idx, (ch_key, q) in enumerate(filtered_context):
-                # Get images assigned to this question
-                q_images = [img for img in st.session_state.images
-                           if st.session_state.image_assignments.get(img["filename"]) == q["full_id"]]
-
-                # Card container - use divider and container instead of nested expander
-                st.markdown("---")
-                img_indicator = f" [{len(q_images)} img]" if q_images else ""
-                st.markdown(f"**{q['full_id']}**{img_indicator}")
-
-                col1, col2 = st.columns([2, 1])
-
-                with col1:
-                    st.markdown(f"**Question Text:**")
-                    st.markdown(q.get("text", "No text"))
-
-                    # Show potential sub-questions that would inherit this context
-                    # A sub-question of "1" is "1a", "1b", etc. (NOT "10", "11")
-                    # The character immediately after the context ID must be a letter
-                    q_id = q.get("local_id", "")
-                    sub_questions = []
-                    for sq in st.session_state.questions.get(ch_key, []):
-                        sq_id = sq.get("local_id", "")
-                        if (sq_id.startswith(q_id) and
-                            len(sq_id) > len(q_id) and
-                            sq_id[len(q_id)].isalpha()):
-                            sub_questions.append(sq)
-                    if sub_questions:
-                        st.markdown(f"**Sub-questions:** {', '.join(sq.get('local_id', '?') for sq in sub_questions)}")
-
-                with col2:
-                    if q_images:
-                        for img in q_images:
-                            if os.path.exists(img["filepath"]):
-                                st.image(img["filepath"], caption=f"Page {img['page']}")
-                    else:
-                        st.caption("No images assigned")
-
-    st.markdown("---")
-
-    merged_count = sum(len(qs) for qs in st.session_state.questions_merged.values())
-    if merged_count > 0:
-        context_only_merged = sum(
-            1 for qs in st.session_state.questions_merged.values()
-            for q in qs if q.get("is_context_only")
-        )
-        actual_cards = merged_count - context_only_merged
-
-        st.success(f"Context already associated. {actual_cards} card-ready questions" +
-                  (f" + {context_only_merged} context-only" if context_only_merged > 0 else "") +
-                  " saved.")
-
-        filter_col1, filter_col2 = st.columns([1, 2])
-        with filter_col1:
-            hide_context_only = st.checkbox("Hide context-only entries", value=True, key="context_hide_ctx")
-        with filter_col2:
-            chapter_filter = st.selectbox(
-                "Filter by chapter:",
-                ["All chapters"] + sort_chapter_keys(st.session_state.questions_merged.keys()),
-                key="context_chapter_filter"
-            )
-
-        # Context-only questions preview section
-        context_only_questions = []
-        for ch_key in sort_chapter_keys(st.session_state.questions_merged.keys()):
-            for q in st.session_state.questions_merged[ch_key]:
-                if q.get("is_context_only"):
-                    context_only_questions.append((ch_key, q))
-
-        if context_only_questions:
-            with st.expander(f"Context-Only Questions ({len(context_only_questions)} total) - These will NOT become Anki cards", expanded=False):
-                assignments_merged = st.session_state.image_assignments_merged if st.session_state.image_assignments_merged else st.session_state.image_assignments
-
-                # Chapter filter for context-only
-                ctx_merged_chapters = sorted(set(ch for ch, _ in context_only_questions),
-                                            key=lambda x: int(x.replace("ch", "")))
-                ctx_filter = st.selectbox(
-                    "Filter:",
-                    ["All chapters"] + ctx_merged_chapters,
-                    key="ctx_merged_filter"
-                )
-
-                filtered_ctx = [(ch, q) for ch, q in context_only_questions
-                               if ctx_filter == "All chapters" or ch == ctx_filter]
-
-                for ch_key, q in filtered_ctx:
-                    q_images = [img for img in st.session_state.images
-                               if assignments_merged.get(img["filename"]) == q["full_id"]]
-
-                    img_indicator = f" [{len(q_images)} img]" if q_images else ""
-
-                    # Use container with divider instead of nested expander
-                    st.markdown(f"---")
-                    st.markdown(f"**{q['full_id']}**{img_indicator}")
-                    col1, col2 = st.columns([2, 1])
-
-                    with col1:
-                        st.markdown(q.get("text", "No text")[:300] + "..." if len(q.get("text", "")) > 300 else q.get("text", "No text"))
-
-                        # Show which sub-questions inherited this context
-                        inherited_by = [sq["local_id"] for sq in st.session_state.questions_merged.get(ch_key, [])
-                                       if sq.get("context_from") == q["full_id"]]
-                        if inherited_by:
-                            st.success(f"Context inherited by: {', '.join(inherited_by)}")
-
-                    with col2:
-                        if q_images:
-                            for img in q_images:
-                                if os.path.exists(img["filepath"]):
-                                    st.image(img["filepath"], caption=f"Page {img['page']}")
-
-        st.subheader("Merged Questions Preview")
-
-        assignments_to_use = st.session_state.image_assignments_merged if st.session_state.image_assignments_merged else st.session_state.image_assignments
-
-        all_merged_questions = []
-        for ch_key in sort_chapter_keys(st.session_state.questions_merged.keys()):
-            if chapter_filter != "All chapters" and ch_key != chapter_filter:
-                continue
-            for q in st.session_state.questions_merged[ch_key]:
-                if hide_context_only and q.get("is_context_only"):
-                    continue
-                all_merged_questions.append((ch_key, q))
-
-        st.caption(f"Showing {len(all_merged_questions)} questions")
-
-        current_chapter = None
-        for ch_key, q in all_merged_questions:
-            if ch_key != current_chapter:
-                current_chapter = ch_key
-                questions_in_ch = st.session_state.questions_merged[ch_key]
-                ch_context_only = sum(1 for qx in questions_in_ch if qx.get("is_context_only"))
-                ch_actual = len(questions_in_ch) - ch_context_only
-                st.markdown(f"### Chapter {ch_key} ({ch_actual} questions" +
-                           (f" + {ch_context_only} context-only" if ch_context_only > 0 else "") + ")")
-
-            # Get images directly from question's image_files array
-            # (all block images are distributed to all sub-questions)
-            q_image_files = set(q.get("image_files", []))
-            q_images = [img for img in st.session_state.images if img["filename"] in q_image_files]
-
-            indicators = []
-
-            if q.get("is_context_only"):
-                indicators.append("[CTX-ONLY]")
-            elif q.get("context_merged"):
-                indicators.append("[+CTX]")
-
-            if q_images:
-                indicators.append(f"[{len(q_images)} img]")
-            elif q.get("has_image"):
-                indicators.append("[needs img]")
-
-            indicator_str = " ".join(indicators)
-            if indicator_str:
-                indicator_str = " " + indicator_str
-
-            display_text = q['text'][:70] + "..." if len(q['text']) > 70 else q['text']
-
-            with st.expander(f"Q{q['local_id']}{indicator_str}: {display_text}"):
-                col1, col2 = st.columns([2, 1])
-
-                with col1:
-                    if q.get("is_context_only"):
-                        st.warning("**CONTEXT ONLY** - This provides context for sub-questions and will NOT become an Anki card")
-
-                    if q.get("context_merged"):
-                        st.success(f"Context merged from Q{q.get('context_from', '?').split('_')[-1]}")
-
-                    st.markdown(f"**Question:** {q['text']}")
-
-                    if q.get("choices"):
-                        st.markdown("**Choices:**")
-                        for letter, choice in q.get("choices", {}).items():
-                            st.markdown(f"- {letter}: {choice}")
-                        st.markdown(f"**Correct Answer:** {q.get('correct_answer', 'N/A')}")
-                        st.markdown(f"**Explanation:** {q.get('explanation', 'N/A')}")
-
-                with col2:
-                    if q_images:
-                        for img in q_images:
-                            if os.path.exists(img["filepath"]):
-                                st.image(img["filepath"], caption=f"Page {img['page']}", width=200)
-                    elif q.get("has_image"):
-                        st.warning("Needs image assignment")
-
-    # Button processing logic (button rendered at top of page)
-    if apply_extracted:
-        # Apply pre-extracted context without LLM call
-        from llm_extraction import apply_extracted_context
-
-        status_text = st.empty()
-        status_text.text("Applying pre-extracted context relationships...")
-
-        questions_copy = copy.deepcopy(st.session_state.questions)
-        assignments_copy = copy.deepcopy(st.session_state.image_assignments)
-
-        updated_questions, updated_assignments, stats = apply_extracted_context(
-            questions_copy, assignments_copy
-        )
-
-        # Save results
-        st.session_state.questions_merged = updated_questions
-        st.session_state.image_assignments = updated_assignments
-        save_questions_merged()
-        save_image_assignments()
-
-        status_text.empty()
-        st.success(
-            f"Applied extracted context: {stats['context_questions_found']} context questions identified, "
-            f"{stats['sub_questions_updated']} sub-questions updated"
-        )
-        st.rerun()
-
-    if run_context_association:
-        client = get_anthropic_client()
-        if not client:
-            st.error("ANTHROPIC_API_KEY not set. Please set the environment variable.")
-        else:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            chapter_status = st.empty()
-
-            questions_copy = copy.deepcopy(st.session_state.questions)
-            assignments_copy = copy.deepcopy(st.session_state.image_assignments)
-            model_id = get_model_id(st.session_state.selected_model)
-
-            total_chapters = len(questions_copy)
-            max_workers = min(context_workers, total_chapters)
-            status_text.text(f"Processing {total_chapters} chapters with {max_workers} parallel workers...")
-
-            # Worker function for parallel context association
-            def process_chapter_context(ch_key: str, ch_questions: list) -> tuple:
-                """Process context for one chapter. Returns (ch_key, updated_questions, ch_stats)."""
-                from llm_extraction import get_prompt, stream_message, get_extraction_logger
-                import json
-                import re
-
-                logger = get_extraction_logger()
-                ch_stats = {"context_questions_found": 0, "sub_questions_updated": 0, "images_copied": 0}
-
-                if not ch_questions:
-                    return ch_key, ch_questions, ch_stats
-
-                # Build summary for LLM with rich context
-                questions_summary = []
-                for q in ch_questions:
-                    choices = q.get("choices", {})
-                    has_choices = bool(choices)
-                    summary = {
-                        "full_id": q["full_id"],
-                        "local_id": q["local_id"],
-                        "text_preview": q["text"][:300] + "..." if len(q["text"]) > 300 else q["text"],
-                        "has_choices": has_choices,
-                        "num_choices": len(choices),
-                        "has_correct_answer": bool(q.get("correct_answer")),
-                        "has_explanation": bool(q.get("explanation"))
-                    }
-                    questions_summary.append(summary)
-
-                prompt = get_prompt("associate_context",
-                                   questions_summary=json.dumps(questions_summary, indent=2))
-
-                try:
-                    response_text, usage = stream_message(
-                        get_anthropic_client(),
-                        model_id,
-                        messages=[{"role": "user", "content": prompt}]
-                    )
-
-                    logger.info(f"Context association {ch_key}: input={usage['input_tokens']:,}, output={usage['output_tokens']:,}")
-
-                    if "```" in response_text:
-                        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
-                        if match:
-                            response_text = match.group(1)
-
-                    result = json.loads(response_text)
-                    mappings = result.get("context_mappings", [])
-
-                    question_by_id = {q["full_id"]: q for q in ch_questions}
-
-                    for mapping in mappings:
-                        context_id = mapping.get("context_id")
-                        sub_ids = mapping.get("sub_question_ids", [])
-
-                        if not context_id or context_id not in question_by_id:
-                            continue
-
-                        context_q = question_by_id[context_id]
-
-                        # Only validation: filter out self-references
-                        sub_ids = [sid for sid in sub_ids if sid != context_id]
-                        if not sub_ids:
-                            continue
-
-                        context_text = context_q.get("text", "").strip()
-                        context_q["is_context_only"] = True
-                        ch_stats["context_questions_found"] += 1
-
-                        # Count context images
-                        context_images = [img for img, assigned_to in assignments_copy.items() if assigned_to == context_id]
-                        ch_stats["images_copied"] += len(context_images)
-
-                        for sub_id in sub_ids:
-                            if sub_id not in question_by_id:
-                                continue
-                            sub_q = question_by_id[sub_id]
-                            if sub_q.get("context_merged"):
-                                continue
-                            original_text = sub_q.get("text", "").strip()
-                            sub_q["text"] = f"{context_text} {original_text}"
-                            sub_q["context_merged"] = True
-                            sub_q["context_from"] = context_id
-                            sub_q["is_context_only"] = False
-                            ch_stats["sub_questions_updated"] += 1
-
-                except json.JSONDecodeError as e:
-                    logger.error(f"Context association {ch_key}: JSON parse error - {e}")
-                except Exception as e:
-                    logger.error(f"Context association {ch_key}: API error - {type(e).__name__}: {e}")
-
-                # Ensure all questions have is_context_only set
-                for q in ch_questions:
-                    if "is_context_only" not in q:
-                        q["is_context_only"] = False
-
-                return ch_key, ch_questions, ch_stats
-
-            # Process chapters in parallel
-            completed = 0
-            updated_questions = {}
-            total_stats = {"context_questions_found": 0, "sub_questions_updated": 0, "images_copied": 0}
-
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_ch = {
-                    executor.submit(process_chapter_context, ch_key, ch_questions): ch_key
-                    for ch_key, ch_questions in questions_copy.items()
-                }
-
-                in_progress = set(list(questions_copy.keys())[:max_workers])
-                chapter_status.text(f"In progress: {', '.join(sorted(in_progress))}")
-
-                for future in as_completed(future_to_ch):
-                    ch_key = future_to_ch[future]
-                    try:
-                        result_ch_key, result_questions, ch_stats = future.result()
-                        updated_questions[result_ch_key] = result_questions
-                        for key in total_stats:
-                            total_stats[key] += ch_stats[key]
-                        # Save incrementally after each chapter completes
-                        st.session_state.questions_merged[result_ch_key] = result_questions
-                        save_questions_merged()
-                    except Exception as e:
-                        logger.error(f"Context association {ch_key}: Failed - {e}")
-                        updated_questions[ch_key] = questions_copy[ch_key]
-
-                    completed += 1
-                    in_progress.discard(ch_key)
-
-                    # Update in-progress set
-                    for next_ch in questions_copy.keys():
-                        if next_ch not in in_progress and next_ch not in updated_questions:
-                            in_progress.add(next_ch)
-                            break
-
-                    progress_bar.progress(completed / total_chapters)
-                    status_text.text(f"Completed {completed}/{total_chapters} chapters...")
-                    if in_progress:
-                        chapter_status.text(f"In progress: {', '.join(sorted(in_progress))}")
-                    else:
-                        chapter_status.empty()
-
-            status_text.text("Saving final merged data...")
-
-            st.session_state.questions_merged = updated_questions
-            st.session_state.image_assignments_merged = assignments_copy
-
-            # Detect page numbers for merged questions
-            if st.session_state.pages and st.session_state.chapters:
-                status_text.text("Detecting page numbers...")
-                add_page_numbers_to_questions(
-                    st.session_state.questions_merged,
-                    st.session_state.pages,
-                    st.session_state.chapters
-                )
-
-            save_questions_merged()
-            save_image_assignments_merged()
-
-            progress_bar.progress(1.0)
-            status_text.text("Done!")
-            chapter_status.empty()
-
-            st.success(
-                f"Context association complete!\n\n"
-                f"- Context questions found: {total_stats['context_questions_found']}\n"
-                f"- Sub-questions updated: {total_stats['sub_questions_updated']}\n"
-                f"- Images copied: {total_stats['images_copied']}"
-            )
-            play_completion_sound()
-
-            st.rerun()
-
-    if merged_count > 0:
-        st.markdown("---")
-        st.subheader("Manage Merged Data")
-
-        btn_col1, btn_col2 = st.columns(2)
-
-        with btn_col1:
-            context_only_ids = []
-            for ch_key, ch_questions in st.session_state.questions_merged.items():
-                for q in ch_questions:
-                    if q.get("is_context_only"):
-                        context_only_ids.append(q["full_id"])
-
-            if context_only_ids:
-                if st.button(f"Remove {len(context_only_ids)} Context-Only Questions", type="primary"):
-                    for ch_key in st.session_state.questions_merged:
-                        st.session_state.questions_merged[ch_key] = [
-                            q for q in st.session_state.questions_merged[ch_key]
-                            if not q.get("is_context_only")
-                        ]
-                    if st.session_state.image_assignments_merged:
-                        st.session_state.image_assignments_merged = {
-                            img: q_id for img, q_id in st.session_state.image_assignments_merged.items()
-                            if q_id not in context_only_ids
-                        }
-                    save_questions_merged()
-                    save_image_assignments_merged()
-                    st.success(f"Removed {len(context_only_ids)} context-only entries. Only card-ready questions remain.")
-                    st.rerun()
-            else:
-                st.info("No context-only questions to remove.")
-
-        with btn_col2:
-            if st.button("Clear All Merged Data", type="secondary"):
-                st.session_state.questions_merged = {}
-                st.session_state.image_assignments_merged = {}
-                from state_management import get_questions_merged_file, get_image_assignments_merged_file
-                merged_file = get_questions_merged_file()
-                assignments_merged_file = get_image_assignments_merged_file()
-                if os.path.exists(merged_file):
-                    os.remove(merged_file)
-                if os.path.exists(assignments_merged_file):
-                    os.remove(assignments_merged_file)
-                st.success("Merged data cleared. Original questions remain intact.")
-                st.rerun()
-
-
-# =============================================================================
-# Step 6: QC Questions
+# Step 5: QC Questions
 # =============================================================================
 
 def render_qc_step():
     """Render QC review step."""
     col1, col2 = st.columns([4, 1])
     with col1:
-        st.header("Step 6: QC Questions")
+        st.header("Step 5: QC Questions")
     with col2:
         if st.button("Reset To This Step", key="clear_qc", type="secondary", help="Clear this step and all subsequent steps"):
             clear_step_data("qc")
             st.success("QC and export data cleared")
             st.rerun()
 
-    # Use merged questions if available (after Step 5), otherwise use formatted questions (Step 4)
+    # Use merged questions if available (legacy), otherwise use formatted questions from Step 4
     questions_source = st.session_state.questions_merged if st.session_state.questions_merged else st.session_state.questions
 
     if not questions_source:
@@ -3266,7 +2470,7 @@ def render_qc_step():
 
 
 # =============================================================================
-# Step 7: Export
+# Anki Deck Generation Helper
 # =============================================================================
 
 def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_assignments: dict,
@@ -3770,6 +2974,10 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
     return output_path
 
 
+# =============================================================================
+# Step 6: Generate Questions
+# =============================================================================
+
 def render_generate_step():
     """Render the cloze card generation step."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3779,7 +2987,7 @@ def render_generate_step():
 
     col1, col2 = st.columns([4, 1])
     with col1:
-        st.header("Step 7: Generate Questions")
+        st.header("Step 6: Generate Questions")
     with col2:
         if st.button("Reset To This Step", key="clear_generate", type="secondary",
                      help="Clear generated cloze cards"):
@@ -3787,9 +2995,11 @@ def render_generate_step():
             st.success("Generated cards cleared")
             st.rerun()
 
-    # Check if block data is available
+    # Check if block data is available (support both question_blocks and raw_blocks)
     question_blocks = st.session_state.get("question_blocks", {})
-    has_blocks = bool(question_blocks) and any(question_blocks.values())
+    raw_blocks = st.session_state.get("raw_blocks", {})
+    has_blocks = (bool(question_blocks) and any(question_blocks.values())) or \
+                 (bool(raw_blocks) and any(raw_blocks.values()))
 
     if has_blocks:
         st.markdown("""
@@ -3822,16 +3032,31 @@ def render_generate_step():
         return
 
     # Gather blocks for block-based generation
+    # Prefer raw_blocks (new format with question_text_raw/answer_text_raw) over question_blocks
+    # Raw blocks can be fed directly to the LLM without additional formatting
+    raw_blocks = st.session_state.get("raw_blocks", {})
+
+    # Check if raw_blocks has the new format (answer_text_raw field)
+    has_new_format_blocks = False
+    if raw_blocks:
+        for ch_blocks in raw_blocks.values():
+            if ch_blocks and any(b.get("answer_text_raw") for b in ch_blocks):
+                has_new_format_blocks = True
+                break
+
+    blocks_source = raw_blocks if has_new_format_blocks else (question_blocks if question_blocks else raw_blocks)
     all_blocks = []
-    if use_block_generation and question_blocks:
-        for ch_key in sort_chapter_keys(question_blocks.keys()):
-            ch_blocks = question_blocks[ch_key]
+    if use_block_generation and blocks_source:
+        for ch_key in sort_chapter_keys(blocks_source.keys()):
+            ch_blocks = blocks_source[ch_key]
             ch_num = int(ch_key[2:]) if ch_key.startswith("ch") else 0
             for block in ch_blocks:
                 # Check if block has content worth generating from
+                # Support both old format (shared_answer_text/sub_questions) and new format (answer_text_raw)
                 has_content = (
-                    block.get("shared_answer_text") or
-                    any(sq.get("specific_answer_text") for sq in block.get("sub_questions", []))
+                    block.get("answer_text_raw") or  # New block format
+                    block.get("shared_answer_text") or  # Old format
+                    any(sq.get("specific_answer_text") for sq in block.get("sub_questions", []))  # Old format
                 )
                 if has_content:
                     all_blocks.append((ch_key, ch_num, block))
@@ -4406,11 +3631,15 @@ def render_generate_step():
                             st.markdown(f"{i}. {display}")
 
 
+# =============================================================================
+# Step 7: Export
+# =============================================================================
+
 def render_export_step():
     """Render export step."""
     col1, col2 = st.columns([4, 1])
     with col1:
-        st.header("Step 8: Export to Anki")
+        st.header("Step 7: Export to Anki")
     with col2:
         if st.button("Clear Exports", key="clear_export", type="secondary", help="Delete exported .apkg files"):
             clear_step_data("export")

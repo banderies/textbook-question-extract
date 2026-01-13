@@ -721,28 +721,42 @@ generate_cloze_cards_from_block:
     BLOCK ID: {block_id}
     CHAPTER: {chapter_num}
 
-    CONTEXT (clinical scenario):
+    NOTE: The text below may be RAW and UNFORMATTED - extracted directly from PDF.
+    It may contain:
+    - [IMAGE: filename.jpg] markers indicating where images appear
+    - Question numbers (e.g., "1", "2a", "7b") mixed into the text
+    - Multiple choice options (A. B. C. D.)
+    - References at the end of answers
+    - Minor formatting irregularities
+
+    This is INTENTIONAL - you are a powerful model that can parse raw text.
+    Focus on extracting the EDUCATIONAL CONTENT, not the formatting.
+
+    ============================================================
+    QUESTION SECTION (clinical scenario, question stem, choices):
+    ============================================================
     {context_text}
 
-    SUB-QUESTIONS AND SPECIFIC ANSWERS:
-    {sub_questions_text}
-
-    SHARED DISCUSSION (applies to all sub-questions):
+    ============================================================
+    ANSWER SECTION (correct answer, explanation, discussion):
+    ============================================================
     {shared_discussion_text}
 
+    {sub_questions_text}
+
     ============================================================
-    TASK: Create cloze cards from ALL content in this block
+    TASK: Create cloze cards from ALL educational content
     ============================================================
 
-    You have access to:
-    1. The clinical scenario/context
-    2. Each sub-question with its specific answer
-    3. Shared discussion content (imaging findings, differential diagnosis, etc.)
+    Parse the raw text above to extract:
+    1. The clinical scenario and key findings
+    2. The correct answer and WHY it is correct
+    3. Explanatory content about the condition, anatomy, pathology, etc.
+    4. Differential diagnosis points if mentioned
+    5. Key facts from references if educationally valuable
 
-    Extract facts from ALL of these sources. The shared discussion is especially valuable
-    as it contains detailed educational content that applies to the entire case.
-
-    For each card, indicate which sub-question it relates to most (if applicable).
+    IGNORE: Question numbers, image markers, formatting artifacts, and the choices themselves
+    (don't create cards about "A is correct" - create cards about the CONCEPT)
 
     CLOZE SYNTAX:
     - Use {{{{c1::text::hint}}}} format with semantic hints
@@ -755,7 +769,7 @@ generate_cloze_cards_from_block:
     [
       {{
         "cloze_text": "<b>{{{{c1::Finding::type}}}}</b> is seen in this <b>condition</b>.",
-        "learning_point": "Key concept",
+        "learning_point": "Key concept being tested",
         "confidence": "high",
         "category": "imaging",
         "source_sub_question_id": "1a"
@@ -764,8 +778,8 @@ generate_cloze_cards_from_block:
     ]
 
     source_sub_question_id should be:
-    - The specific sub-question ID if the fact relates to a specific answer
-    - Empty string "" if the fact comes from shared discussion applicable to all
+    - The sub-question ID (e.g., "1a", "7b") if the fact relates to a specific sub-question
+    - Empty string "" if the fact is from shared discussion or applies to the whole block
 
     Categories: anatomy, pathology, imaging, clinical, differential, statistics, mechanism
 

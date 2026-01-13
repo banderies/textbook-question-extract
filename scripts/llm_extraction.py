@@ -1248,228 +1248,6 @@ def add_page_numbers_to_questions(questions: dict, pages: list[dict], chapters: 
     return questions
 
 
-def apply_extracted_context(questions: dict, image_assignments: dict) -> tuple[dict, dict, dict]:
-    """
-    Apply context relationships using pre-extracted context_source field.
-
-    This uses the context_source field populated during question extraction,
-    avoiding the need for a separate LLM call.
-
-    Returns:
-        Tuple of (updated_questions, updated_image_assignments, stats)
-    """
-    logger = get_extraction_logger()
-    total_questions = sum(len(qs) for qs in questions.values())
-    logger.info(f"Applying pre-extracted context for {total_questions} questions")
-
-    if image_assignments is None:
-        image_assignments = {}
-
-    updated_assignments = dict(image_assignments)
-
-    stats = {
-        "context_questions_found": 0,
-        "sub_questions_updated": 0,
-        "images_copied": 0,
-        "method": "extracted"
-    }
-
-    for ch_key, ch_questions in questions.items():
-        if not ch_questions:
-            continue
-
-        # Build lookup by full_id
-        question_by_id = {q["full_id"]: q for q in ch_questions}
-
-        # Find all context sources (questions that provide context to others)
-        context_ids = set()
-        for q in ch_questions:
-            context_source = q.get("context_source")
-            if context_source:
-                context_ids.add(context_source)
-
-        # Mark context providers and merge into sub-questions
-        for q in ch_questions:
-            context_source = q.get("context_source")
-
-            if q["full_id"] in context_ids:
-                # This question provides context to others
-                if not q.get("is_context_only"):
-                    q["is_context_only"] = True
-                    stats["context_questions_found"] += 1
-
-            if context_source and context_source in question_by_id:
-                # This question inherits context
-                if q.get("context_merged"):
-                    continue  # Already processed
-
-                context_q = question_by_id[context_source]
-                context_text = context_q.get("text", "").strip()
-
-                if context_text:
-                    original_text = q.get("text", "").strip()
-                    q["text"] = f"{context_text} {original_text}"
-                    q["context_merged"] = True
-                    q["context_from"] = context_source
-                    q["is_context_only"] = False
-                    stats["sub_questions_updated"] += 1
-
-                    # Count images that will be inherited
-                    context_images = [
-                        img for img, assigned_to in image_assignments.items()
-                        if assigned_to == context_source
-                    ]
-                    stats["images_copied"] += len(context_images)
-
-    # Ensure all questions have is_context_only set
-    for ch_key, ch_questions in questions.items():
-        for q in ch_questions:
-            if "is_context_only" not in q:
-                q["is_context_only"] = False
-
-    logger.info(
-        f"Applied extracted context: {stats['context_questions_found']} context questions, "
-        f"{stats['sub_questions_updated']} sub-questions updated"
-    )
-
-    return questions, updated_assignments, stats
-
-
-def associate_context_llm(client, questions: dict, image_assignments: dict,
-                          model_id: str) -> tuple[dict, dict, dict]:
-    """
-    Use LLM to identify context relationships and merge context into sub-questions.
-
-    Returns:
-        Tuple of (updated_questions, updated_image_assignments, stats)
-    """
-    logger = get_extraction_logger()
-    total_questions = sum(len(qs) for qs in questions.values())
-    logger.info(f"Associating context for {total_questions} questions using {model_id}")
-
-    if image_assignments is None:
-        image_assignments = {}
-
-    updated_assignments = dict(image_assignments)
-
-    stats = {
-        "context_questions_found": 0,
-        "sub_questions_updated": 0,
-        "images_copied": 0
-    }
-
-    for ch_key, ch_questions in questions.items():
-        if not ch_questions:
-            continue
-
-        # Build summary for LLM with rich context
-        questions_summary = []
-        for q in ch_questions:
-            choices = q.get("choices", {})
-            has_choices = bool(choices)
-            summary = {
-                "full_id": q["full_id"],
-                "local_id": q["local_id"],
-                "text_preview": q["text"][:300] + "..." if len(q["text"]) > 300 else q["text"],
-                "has_choices": has_choices,
-                "num_choices": len(choices),
-                "has_correct_answer": bool(q.get("correct_answer")),
-                "has_explanation": bool(q.get("explanation"))
-            }
-            questions_summary.append(summary)
-
-        prompt = get_prompt("associate_context",
-                           questions_summary=json.dumps(questions_summary, indent=2))
-
-        try:
-            response_text, usage = stream_message(
-                client,
-                model_id,
-                messages=[{"role": "user", "content": prompt}]
-            )
-
-            logger.info(
-                f"Context association {ch_key}: input={usage['input_tokens']:,}, "
-                f"output={usage['output_tokens']:,}"
-            )
-
-            if "```" in response_text:
-                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
-                if match:
-                    response_text = match.group(1)
-
-            result = json.loads(response_text)
-            mappings = result.get("context_mappings", [])
-            logger.debug(f"{ch_key}: Found {len(mappings)} context mappings")
-
-            question_by_id = {q["full_id"]: q for q in ch_questions}
-
-            for mapping in mappings:
-                context_id = mapping.get("context_id")
-                sub_ids = mapping.get("sub_question_ids", [])
-
-                if not context_id or context_id not in question_by_id:
-                    continue
-
-                context_q = question_by_id[context_id]
-
-                # Only validation: filter out self-references (question inheriting from itself)
-                sub_ids = [sid for sid in sub_ids if sid != context_id]
-                if not sub_ids:
-                    continue
-
-                context_text = context_q.get("text", "").strip()
-
-                context_q["is_context_only"] = True
-                stats["context_questions_found"] += 1
-
-                # Count context images (they stay assigned to context question,
-                # sub-questions inherit them via context_from field)
-                context_images = [
-                    img_file for img_file, assigned_to in image_assignments.items()
-                    if assigned_to == context_id
-                ]
-                stats["images_copied"] += len(context_images)
-
-                for sub_id in sub_ids:
-                    if sub_id not in question_by_id:
-                        continue
-
-                    sub_q = question_by_id[sub_id]
-
-                    if sub_q.get("context_merged"):
-                        continue
-
-                    original_text = sub_q.get("text", "").strip()
-                    sub_q["text"] = f"{context_text} {original_text}"
-                    sub_q["context_merged"] = True
-                    sub_q["context_from"] = context_id
-                    sub_q["is_context_only"] = False
-                    stats["sub_questions_updated"] += 1
-                    # Images stay assigned to context question - sub-questions
-                    # inherit them via context_from lookup in display code
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Context association {ch_key}: JSON parse error - {e}")
-            continue
-        except Exception as e:
-            logger.error(f"Context association {ch_key}: API error - {type(e).__name__}: {e}")
-            continue
-
-    logger.info(
-        f"Context association complete: {stats['context_questions_found']} context questions, "
-        f"{stats['sub_questions_updated']} sub-questions updated"
-    )
-
-    # Ensure all questions have is_context_only set
-    for ch_key, ch_questions in questions.items():
-        for q in ch_questions:
-            if "is_context_only" not in q:
-                q["is_context_only"] = False
-
-    return questions, updated_assignments, stats
-
-
 def generate_cloze_cards_llm(
     client,
     question: dict,
@@ -1852,28 +1630,50 @@ def generate_cloze_cards_from_block_llm(
     block_id = block.get("block_id", f"ch{chapter_num}_block_{block.get('block_label', 'unknown')}")
     log_prefix = f"Cloze {block_id}"
 
-    # Build sub-questions summary
-    sub_questions_parts = []
-    for sq in block.get("sub_questions", []):
-        sq_text = f"Sub-question {sq.get('local_id', '?')}:\n"
-        sq_text += f"  Question: {sq.get('question_text', '')}\n"
-        sq_text += f"  Correct Answer: {sq.get('correct_answer', '')}\n"
-        sq_text += f"  Specific Answer: {sq.get('specific_answer', '')}\n"
-        sub_questions_parts.append(sq_text)
-    sub_questions_summary = "\n".join(sub_questions_parts) if sub_questions_parts else "(no sub-questions)"
+    # Detect block format: new format has question_text_raw/answer_text_raw
+    is_new_format = "question_text_raw" in block or "answer_text_raw" in block
 
-    # Get shared discussion components
-    shared = block.get("shared_discussion", {})
-    imaging_findings = shared.get("imaging_findings", "") or "(none)"
-    discussion = shared.get("discussion", "") or "(none)"
-    differential = shared.get("differential_diagnosis", "") or "(none)"
+    if is_new_format:
+        # New block format: question_text_raw and answer_text_raw
+        question_text = block.get("question_text_raw", "") or "(no question text)"
+        answer_text = block.get("answer_text_raw", "") or "(no answer text)"
 
-    # Check if there's enough content to generate cards
-    total_content = (
-        block.get("context", {}).get("text", "") +
-        sub_questions_summary +
-        imaging_findings + discussion + differential
-    )
+        # For new format, the question is the context and sub-question combined
+        context_text = question_text
+        sub_questions_text = "(question and choices included in context above)"
+        shared_discussion_text = answer_text
+
+        total_content = question_text + answer_text
+    else:
+        # Old block format: sub_questions and shared_discussion
+        sub_questions_parts = []
+        for sq in block.get("sub_questions", []):
+            sq_text = f"Sub-question {sq.get('local_id', '?')}:\n"
+            sq_text += f"  Question: {sq.get('question_text', '')}\n"
+            sq_text += f"  Correct Answer: {sq.get('correct_answer', '')}\n"
+            sq_text += f"  Specific Answer: {sq.get('specific_answer', '')}\n"
+            sub_questions_parts.append(sq_text)
+        sub_questions_text = "\n".join(sub_questions_parts) if sub_questions_parts else "(no sub-questions)"
+
+        # Get shared discussion components
+        shared = block.get("shared_discussion", {})
+        imaging_findings = shared.get("imaging_findings", "") or ""
+        discussion = shared.get("discussion", "") or ""
+        differential = shared.get("differential_diagnosis", "") or ""
+
+        # Combine shared discussion components
+        shared_parts = []
+        if imaging_findings:
+            shared_parts.append(f"Imaging Findings: {imaging_findings}")
+        if discussion:
+            shared_parts.append(f"Discussion: {discussion}")
+        if differential:
+            shared_parts.append(f"Differential Diagnosis: {differential}")
+        shared_discussion_text = "\n\n".join(shared_parts) if shared_parts else "(no shared discussion)"
+
+        context_text = block.get("context", {}).get("text", "") or "(no shared context)"
+        total_content = context_text + sub_questions_text + shared_discussion_text
+
     if len(total_content) < 100:
         logger.debug(f"{log_prefix}: Skipping - content too short ({len(total_content)} chars)")
         return []
@@ -1881,11 +1681,10 @@ def generate_cloze_cards_from_block_llm(
     prompt = get_prompt(
         "generate_cloze_cards_from_block",
         block_id=block_id,
-        context_text=block.get("context", {}).get("text", "") or "(no shared context)",
-        sub_questions_summary=sub_questions_summary,
-        imaging_findings=imaging_findings,
-        discussion=discussion,
-        differential_diagnosis=differential
+        chapter_num=chapter_num,
+        context_text=context_text,
+        sub_questions_text=sub_questions_text,
+        shared_discussion_text=shared_discussion_text
     )
 
     for attempt in range(max_retries + 1):
