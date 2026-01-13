@@ -25,33 +25,32 @@ STEP 2: EXTRACT CHAPTERS
     ↓
 STEP 3: EXTRACT QUESTIONS (Block-Based)
 ├── First pass: LLM identifies question BLOCKS (grouped by main question number)
-├── Output: raw_blocks.json (block boundaries with line ranges)
+├── Output: raw_blocks.json (block boundaries with line ranges + raw text)
 └── Each block contains: context + sub-questions + shared discussion
     ↓
 STEP 4: FORMAT QUESTIONS
 ├── Second pass: LLM formats each block into structured JSON
 ├── Extracts page numbers from [PAGE N] markers in raw text
-├── Separates question images from answer images
+├── Distributes images: context images to all sub-questions, specific images to their question
+├── Separates question images (image_files) from answer images (answer_image_files)
 ├── Sets context_from on subsequent sub-questions for inheritance
-└── Output: questions_by_chapter.json + image_assignments.json + raw_questions.json
+└── Output: questions_by_chapter.json + image_assignments.json
     ↓
-STEP 5: ASSOCIATE CONTEXT
-├── LLM identifies context-only questions (clinical scenarios without choices)
-├── Merges context text into sub-questions (e.g., Q1 context → Q1a, Q1b, Q1c)
-├── Sub-questions inherit images via context_from field
-└── Output: questions_merged.json + image_assignments_merged.json
-    ↓
-STEP 6: QC QUESTIONS
-├── Streamlit GUI: Review/correct assignments
-├── Approve/flag questions, reassign images
+STEP 5: QC QUESTIONS
+├── Streamlit GUI: Review/correct image assignments
+├── Approve/flag questions, reassign images between questions
 └── Output: qc_progress.json
     ↓
-STEP 7: GENERATE (optional)
-├── Generate cloze deletion cards from explanations
+STEP 6: GENERATE (optional)
+├── Generate cloze deletion cards from raw block content
+├── Uses full context (question + answer + discussion) for accurate card generation
 └── Output: generated_questions.json
     ↓
-STEP 8: EXPORT
+STEP 7: EXPORT
 └── Output: .apkg file (importable to Anki)
+
+UTILITY: EDIT PROMPTS (Step 8)
+└── Edit LLM prompts via GUI without code changes
 ```
 
 ### Modular Code Structure
@@ -100,33 +99,40 @@ All state is persisted to JSON files in `output/<textbook_name>/`:
 | `chapters.json` | Detected chapters with page ranges |
 | `chapter_text.json` | Extracted text per chapter |
 | `images.json` | Image metadata with flanking text context |
-| `raw_blocks.json` | Question blocks with line ranges (Step 3 output) |
-| `questions_by_chapter.json` | Formatted Q&A pairs with block_id and context_from |
+| `raw_blocks.json` | Question blocks with line ranges + raw text (Step 3 output) |
+| `questions_by_chapter.json` | Formatted Q&A pairs with block_id, context_from, image_files |
 | `image_assignments.json` | Image filename → question ID mapping (block-aware) |
-| `questions_merged.json` | Questions with context merged into sub-questions |
-| `image_assignments_merged.json` | Image assignments after context association |
 | `qc_progress.json` | QC review status per question |
 | `settings.json` | UI state (selected model, current step, QC position) |
-| `raw_questions.json` | Line ranges + extracted text from two-pass extraction |
 | `generated_questions.json` | Generated cloze deletion cards |
 | `extraction.log` | Debug log for LLM extraction operations |
+
+**Legacy files** (supported for backwards compatibility):
+| File | Contents |
+|------|----------|
+| `raw_questions.json` | Legacy two-pass extraction format |
+| `questions_merged.json` | Legacy context association output |
+| `image_assignments_merged.json` | Legacy image assignments after context association |
 
 ## Key Design Patterns
 
 ### Editable Prompts (config/prompts.yaml)
 All LLM prompts are stored in YAML for easy editing without code changes:
-- `identify_chapters` - Find chapter boundaries
-- `identify_question_blocks` - First pass: identify question blocks with line ranges
-- `format_raw_block` - Second pass: format blocks into structured Q&A pairs
-- `associate_context` - Link context questions to sub-questions
-- `generate_cloze_cards_from_block` - Generate cloze cards from block explanations
 
-Legacy prompts (still available):
+**Active prompts (current pipeline)**:
+- `identify_chapters` - Find chapter boundaries from page index (Step 2)
+- `identify_question_blocks` - Identify question blocks with line ranges (Step 3)
+- `format_raw_block` - Format blocks into structured Q&A pairs with image distribution (Step 4)
+- `generate_cloze_cards_from_block` - Generate cloze cards from raw block content (Step 6)
+
+**Legacy prompts** (available for backwards compatibility):
 - `extract_qa_pairs` - Single-pass extraction (deprecated)
 - `extract_line_ranges` - Legacy line range extraction
 - `format_qa_pair` - Legacy individual Q&A formatting
 - `match_images_to_questions` - Assign images using flanking text
-- `generate_cloze_cards` - Generate cloze deletion flashcards
+- `associate_context` - Link context questions to sub-questions (no longer a separate step)
+- `postprocess_questions` - Legacy post-processing
+- `generate_cloze_cards` - Generate cloze cards from individual question explanations
 
 ### Dynamic Model Selection
 - Models fetched from Anthropic API via `client.models.list()`
@@ -141,7 +147,7 @@ Images are matched to questions using surrounding text context:
 4. Multiple images can belong to the same question
 
 ### LLM-Based Image Distribution
-The LLM handles image assignment during the `format_raw_block` step, following these rules:
+The LLM handles image assignment during the `format_raw_block` step (Step 4), following these rules:
 
 **Question vs Answer Images**:
 Images are tracked separately based on which section they appear in:
@@ -172,14 +178,13 @@ Block 4:
 - `Image` field: question images (shown on front and back)
 - `AnswerImage` field: answer images (shown only on back, after explanation)
 
-**Post-Processing** (handled by `build_block_aware_image_assignments()`):
+**Post-Processing** (handled by `build_block_aware_image_assignments()` in `ui_components.py`):
 1. Build `image_assignments` dict (first question with each image wins)
 2. Set `context_from` on subsequent sub-questions for inheritance
 
-**Image Retrieval**:
+**Image Retrieval** (in `ui_components.py`):
 - `get_images_for_question()` → returns question images from `image_files`
 - `get_answer_images_for_question()` → returns answer images from `answer_image_files`
-- Both prefer `questions` over `questions_merged` to use freshest data
 
 ### Chapter-Aware Processing
 Question numbering restarts each chapter, so IDs are prefixed: `2a` becomes `ch1_2a` or `ch8_2a`.
@@ -256,5 +261,5 @@ LLM extraction operations are logged to `output/<textbook>/extraction.log`:
 - **Images not matching**: Check flanking text in `images.json` - the text before each image should end with a question number
 - **Missing questions**: Review `raw_blocks.json` to verify block boundaries are correct
 - **Images not inherited**: Verify `context_from` is set on sub-questions (check `questions_by_chapter.json`)
-- **Wrong image assignment**: Check `block_id` field - questions in same block share context images
-- **Context not merging**: Questions need matching `block_id` fields; first sub-question gets shared images
+- **Wrong image assignment**: Check `block_id` field - questions in same block share context images; use QC step to reassign
+- **Context not appearing**: Ensure the block contains context text; check `raw_blocks.json` for the raw content

@@ -4,7 +4,7 @@ This document details which parts of each extraction step use traditional (non-L
 
 ## Overview
 
-The pipeline has 8 steps. Traditional processing is used for PDF parsing, data transformation, and structural operations. LLM processing handles semantic understanding, extraction, and classification tasks.
+The pipeline has 7 main steps plus a utility step for editing prompts. Traditional processing is used for PDF parsing, data transformation, and structural operations. LLM processing handles semantic understanding, extraction, and classification tasks.
 
 ---
 
@@ -50,54 +50,52 @@ The pipeline has 8 steps. Traditional processing is used for PDF parsing, data t
 
 | Processing | Type | Location | Description |
 |------------|------|----------|-------------|
-| `format_raw_block_llm()` | **LLM** | `llm_extraction.py` | Formats entire block into structured sub-questions |
-| `repair_json()` | Traditional | `llm_extraction.py:287` | Fixes unescaped quotes, control chars, trailing commas |
-| Rate limit handling | Traditional | `llm_extraction.py:394` | Exponential backoff retry logic |
+| `format_raw_block_llm()` | **LLM** | `llm_extraction.py` | Formats entire block into structured sub-questions with image distribution |
+| `repair_json()` | Traditional | `llm_extraction.py` | Fixes unescaped quotes, control chars, trailing commas |
+| Rate limit handling | Traditional | `llm_extraction.py` | Exponential backoff retry logic |
 | `full_id` generation | Traditional | `llm_extraction.py` | Concatenates `ch{num}_{local_id}` |
-| `build_block_aware_image_assignments()` | Traditional | `ui_components.py:97` | Distributes ALL block images to ALL sub-questions, assigns to first, sets `context_from` |
+| `build_block_aware_image_assignments()` | Traditional | `ui_components.py:97` | Builds image_assignments dict, sets `context_from` on non-first sub-questions |
+| Page number extraction | Traditional | `llm_extraction.py` | Extracts page numbers from [PAGE N] markers |
+
+**Note**: Image distribution is handled by the LLM during `format_raw_block_llm()`:
+- Context images → all sub-questions' `image_files`
+- Sub-question images → that sub-question's `image_files`
+- Answer images → `answer_image_files` arrays
 
 ---
 
-## STEP 5: ASSOCIATE CONTEXT
-
-| Processing | Type | Location | Description |
-|------------|------|----------|-------------|
-| Build `questions_summary` | Traditional | `llm_extraction.py:1240-1253` | Extracts metadata (has_choices, num_choices, etc.) |
-| `associate_context_llm()` | **LLM** | `llm_extraction.py:1212` | Returns context_mappings JSON |
-| Self-reference filtering | Traditional | `llm_extraction.py:1291` | Removes mappings where context_id == sub_id |
-| Context text merging | Traditional | `llm_extraction.py:1318` | Prepends context text to sub-question text |
-| `context_from` assignment | Traditional | `llm_extraction.py:1320` | Links sub-questions to context question |
-| `is_context_only` default | Traditional | `llm_extraction.py:1341-1342` | Sets False if not already set |
-
-### Image Matching (also in Step 5)
-
-| Processing | Type | Location | Description |
-|------------|------|----------|-------------|
-| Build `questions_text` | Traditional | `llm_extraction.py:1060-1065` | **Hardcoded 150 chars** + `[NEEDS IMAGE]` flag |
-| Build `images_text` | Traditional | `llm_extraction.py:1069-1075` | **Hardcoded 300 chars** context |
-| `match_images_to_questions_llm()` | **LLM** | `llm_extraction.py:1032` | Matches images to question IDs |
-| `match_images_to_questions_simple()` | Traditional | `llm_extraction.py:1118` | Fallback: page proximity matching |
-
----
-
-## STEP 6: QC QUESTIONS
+## STEP 5: QC QUESTIONS
 
 **All Traditional** - Pure UI rendering and state management, no data processing logic.
 
+| Processing | Type | Location | Description |
+|------------|------|----------|-------------|
+| Question filtering | Traditional | `ui_components.py` | Filter by chapter, review status, context-only |
+| Image assignment UI | Traditional | `ui_components.py` | Reassign images between questions |
+| QC progress tracking | Traditional | `state_management.py` | Save reviewed/approved status |
+
 ---
 
-## STEP 7: GENERATE
+## STEP 6: GENERATE
 
 | Processing | Type | Location | Description |
 |------------|------|----------|-------------|
-| Explanation length check | Traditional | `llm_extraction.py:1383-1385` | Skip if < 50 chars |
-| `generate_cloze_cards_llm()` | **LLM** | `llm_extraction.py:1347` | Generates cloze cards from explanation text |
+| Block content assembly | Traditional | `ui_components.py` | Combine raw question + answer text for LLM |
+| `generate_cloze_cards_from_block_llm()` | **LLM** | `llm_extraction.py` | Generates cloze cards from full block content |
+| `generate_cloze_cards_llm()` | **LLM** | `llm_extraction.py` | Legacy: generates from individual explanations |
+| Explanation length check | Traditional | `llm_extraction.py` | Skip if < 50 chars (legacy mode) |
 
 ---
 
-## STEP 8: EXPORT
+## STEP 7: EXPORT
 
 **All Traditional** - genanki library builds .apkg file from structured data.
+
+| Processing | Type | Location | Description |
+|------------|------|----------|-------------|
+| Deck structure building | Traditional | `ui_components.py` | Organize by chapter |
+| Card HTML generation | Traditional | `ui_components.py` | Build card front/back with images |
+| `.apkg` file creation | Traditional | `genanki` library | Package cards and media |
 
 ---
 
@@ -135,11 +133,10 @@ These hardcoded heuristics may need adjustment when input formats change:
 | 1. Source | 100% | 0% | PDF parsing only |
 | 2. Chapters | 60% | 40% | LLM identifies boundaries |
 | 3. Extract | 40% | 60% | LLM identifies blocks, traditional extracts text |
-| 4. Format | 40% | 60% | LLM formats blocks, traditional handles image assignment with `build_block_aware_image_assignments()` |
-| 5. Context | 40% | 60% | LLM identifies relationships, traditional merges |
-| 6. QC | 100% | 0% | UI only |
-| 7. Generate | 10% | 90% | LLM generates cards |
-| 8. Export | 100% | 0% | File generation only |
+| 4. Format | 30% | 70% | LLM formats blocks + distributes images, traditional builds assignments |
+| 5. QC | 100% | 0% | UI only |
+| 6. Generate | 10% | 90% | LLM generates cloze cards from full block content |
+| 7. Export | 100% | 0% | File generation only |
 
 ---
 

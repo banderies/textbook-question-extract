@@ -16,16 +16,17 @@ export ANTHROPIC_API_KEY='sk-ant-...'
 streamlit run scripts/review_gui.py
 ```
 
-Open http://localhost:8501 and follow the 8-step workflow:
+Open http://localhost:8501 and follow the 7-step workflow:
 
 1. **Select Source** - Load your PDF textbook
 2. **Extract Chapters** - AI identifies chapter boundaries
 3. **Extract Questions** - AI identifies question blocks with line ranges
-4. **Format Questions** - AI formats blocks, assigns images with context inheritance
-5. **Associate Context** - Link context questions to sub-questions (Q1 → Q1a, Q1b)
-6. **QC Questions** - Review and correct image assignments
-7. **Generate** - (Optional) Generate cloze deletion cards
-8. **Export** - Generate Anki deck
+4. **Format Questions** - AI formats blocks, distributes images with context inheritance
+5. **QC Questions** - Review and correct image assignments
+6. **Generate** - (Optional) Generate cloze deletion cards from full block content
+7. **Export** - Generate Anki deck
+
+Plus: **Edit Prompts** - Customize LLM behavior via GUI
 
 ## Requirements
 
@@ -51,13 +52,14 @@ export ANTHROPIC_API_KEY='sk-ant-...'
 
 - **AI-Powered Extraction**: Uses Claude to extract questions, answers, and explanations
 - **Block-Based Processing**: Groups related questions (Q1a, Q1b, Q1c) into blocks that share context
-- **Block-Wide Image Distribution**: ALL images within a block are included with EVERY sub-question (remove incorrect ones during QC)
-- **Context Association**: Merges clinical scenario context into sub-questions
+- **Smart Image Distribution**: Context images distributed to all sub-questions; specific images to their question
+- **Separate Question/Answer Images**: `image_files` for question images, `answer_image_files` for explanation images
 - **Chapter-Aware IDs**: Questions prefixed with chapter (e.g., `ch1_2a`, `ch8_2a`)
-- **Interactive QC**: Streamlit GUI for reviewing and correcting assignments
+- **Interactive QC**: Streamlit GUI for reviewing and correcting image assignments
+- **Cloze Card Generation**: Generate additional flashcards from full block content (question + answer + discussion)
 - **State Persistence**: All progress saved to JSON files
 - **Model Selection**: Choose Claude model per extraction step
-- **Editable Prompts**: Customize LLM behavior via `config/prompts.yaml`
+- **Editable Prompts**: Customize LLM behavior via `config/prompts.yaml` or GUI
 
 ## Project Structure
 

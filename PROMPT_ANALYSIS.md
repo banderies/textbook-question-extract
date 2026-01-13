@@ -6,30 +6,36 @@ This document analyzes each LLM prompt for format-specific assumptions that may 
 
 ## Summary of Format Assumptions
 
-### Current Block-Based Prompts
+### Active Prompts (Current Pipeline)
 
-| Prompt | Critical Assumptions | Flexibility Rating |
-|--------|---------------------|-------------------|
-| `identify_chapters` | Medical textbook, QUESTIONS/ANSWERS sections, chapter headers | Low |
-| `identify_question_blocks` | Block structure with context + sub-questions, line markers | Medium |
-| `format_raw_block` | Block contains context, sub-questions, shared discussion | Medium |
-| `associate_context` | Data-driven (has_choices, etc.) | High |
-| `generate_cloze_cards_from_block` | Medical content, block structure with explanations | Medium |
+| Prompt | Step | Critical Assumptions | Flexibility Rating |
+|--------|------|---------------------|-------------------|
+| `identify_chapters` | 2 | Medical textbook, QUESTIONS/ANSWERS sections, chapter headers | Low |
+| `identify_question_blocks` | 3 | Block structure with context + sub-questions, line markers | Medium |
+| `format_raw_block` | 4 | Block contains context, sub-questions, shared discussion, image distribution | Medium |
+| `generate_cloze_cards_from_block` | 6 | Medical content, raw block text with explanations | Medium |
 
-### Legacy Prompts (Deprecated)
+### Legacy Prompts (Available for Backwards Compatibility)
 
 | Prompt | Critical Assumptions | Flexibility Rating |
 |--------|---------------------|-------------------|
 | `extract_qa_pairs` | QUESTIONS/ANSWERS sections, A-E choices, numbered questions | Low |
 | `match_images_to_questions` | Question number at END of text before image, specific layout | Very Low |
+| `associate_context` | Data-driven (has_choices, etc.) - no longer a separate step | High |
 | `postprocess_questions` | image_group field, numeric vs letter ID patterns | Medium |
 | `extract_line_ranges` | QUESTIONS/ANSWERS sections, "Answer X." format, specific layout | Very Low |
 | `format_qa_pair` | A-E choices format, verbatim extraction | Medium |
-| `generate_cloze_cards` | Medical content focus | Medium |
+| `generate_cloze_cards` | Medical content focus, individual question explanations | Medium |
 
 ---
 
-## Prompt 1: `identify_chapters`
+---
+
+# ACTIVE PROMPTS (Current Pipeline)
+
+---
+
+## Prompt: `identify_chapters` (Step 2)
 
 ### Current Assumptions
 
@@ -80,7 +86,7 @@ identify_chapters:
 
 ---
 
-## Prompt 2: `identify_question_blocks` (NEW - Block-Based)
+## Prompt: `identify_question_blocks` (Step 3)
 
 ### Purpose
 Identifies question BLOCKS - groups of related questions that share context and possibly images.
@@ -110,7 +116,7 @@ Identifies question BLOCKS - groups of related questions that share context and 
 
 ---
 
-## Prompt 3: `format_raw_block` (NEW - Block-Based)
+## Prompt: `format_raw_block` (Step 4)
 
 ### Purpose
 Formats a raw text block into structured JSON with context, sub-questions, and shared discussion.
@@ -132,15 +138,53 @@ Formats a raw text block into structured JSON with context, sub-questions, and s
 
 ### Post-Processing
 The `build_block_aware_image_assignments()` function in `ui_components.py` handles:
-- Collecting ALL images from all sub-questions in the block
-- Adding ALL block images to EACH sub-question's `image_files` array
-- Assigning all images to the FIRST sub-question (for QC management)
-- Setting `context_from` on subsequent sub-questions
-- Users remove incorrect images during QC (since position-based assignment is unreliable)
+- Building the `image_assignments` dict (first question with each image wins)
+- Setting `context_from` on subsequent sub-questions in the block
+
+### Image Distribution (LLM-handled)
+The LLM now handles image distribution directly:
+- Context images → all sub-questions' `image_files`
+- Sub-question images → that sub-question's `image_files`
+- Answer images → `answer_image_files` arrays
 
 ---
 
-## Prompt 4: `extract_qa_pairs` (LEGACY)
+## Prompt: `generate_cloze_cards_from_block` (Step 6)
+
+### Purpose
+Generates cloze deletion flashcards from the raw block content (question + answer + discussion).
+
+### Current Assumptions
+
+```
+- Block contains raw text extracted from PDF
+- Text includes: clinical scenario, question stem, choices, correct answer, explanation, discussion
+- May contain [IMAGE: filename] markers (ignored for card generation)
+- May contain formatting artifacts from PDF extraction
+```
+
+### What Works Well
+- Uses full raw block content (no data loss from intermediate formatting)
+- Medical content focus with appropriate categories
+- Multi-cloze support (c1, c2, c3 on same card for related facts)
+- Handles raw/unformatted text gracefully
+
+### Format-Specific Issues
+
+| Issue | Current Assumption | Alternative Formats |
+|-------|-------------------|---------------------|
+| Domain | Medical content | Could be any subject |
+| Categories | anatomy, pathology, imaging, etc. | Need subject-specific categories |
+
+---
+
+# LEGACY PROMPTS (Available for Backwards Compatibility)
+
+The following prompts are available but no longer used in the main pipeline.
+
+---
+
+## Prompt (Legacy): `extract_qa_pairs`
 
 ### Current Assumptions
 
@@ -196,7 +240,7 @@ extract_qa_pairs:
 
 ---
 
-## Prompt 3: `match_images_to_questions`
+## Prompt (Legacy): `match_images_to_questions`
 
 ### Current Assumptions
 
@@ -261,7 +305,7 @@ match_images_to_questions:
 
 ---
 
-## Prompt 4: `postprocess_questions`
+## Prompt (Legacy): `postprocess_questions`
 
 ### Current Assumptions
 
@@ -288,7 +332,9 @@ match_images_to_questions:
 
 ---
 
-## Prompt 5: `associate_context`
+## Prompt (Legacy): `associate_context`
+
+**Note**: This prompt is no longer used as a separate step. Context handling is now done during the `format_raw_block` step.
 
 ### Current Assumptions
 
@@ -320,7 +366,7 @@ The `associate_context` prompt demonstrates good practice:
 
 ---
 
-## Prompt 6: `extract_line_ranges`
+## Prompt (Legacy): `extract_line_ranges`
 
 ### Current Assumptions
 
@@ -385,7 +431,7 @@ extract_line_ranges:
 
 ---
 
-## Prompt 7: `format_qa_pair`
+## Prompt (Legacy): `format_qa_pair`
 
 ### Current Assumptions
 
@@ -437,7 +483,7 @@ format_qa_pair:
 
 ---
 
-## Prompt 8: `generate_cloze_cards`
+## Prompt (Legacy): `generate_cloze_cards`
 
 ### Current Assumptions
 
@@ -490,22 +536,21 @@ generate_cloze_cards:
 
 ## Flexibility Improvement Priorities
 
-### High Priority (Breaks Most Easily)
+### Active Prompts - Priority for Improvement
 
-1. **`extract_line_ranges`** - "Answer X." format assumption
-2. **`match_images_to_questions`** - Layout-specific assumptions
-3. **`identify_chapters`** - "QUESTIONS/ANSWERS" section names
+1. **`identify_chapters`** (High) - "QUESTIONS/ANSWERS" section names, medical textbook assumption
+2. **`identify_question_blocks`** (Medium) - Block structure assumptions, line marker format
+3. **`format_raw_block`** (Medium) - Context/sub-question structure
+4. **`generate_cloze_cards_from_block`** (Low) - Domain is only constraint, handles raw text well
 
-### Medium Priority
+### Legacy Prompts (Lower Priority - Not in Active Pipeline)
 
-4. **`extract_qa_pairs`** - Choice format (A/B/C/D)
-5. **`format_qa_pair`** - Choice format normalization
-6. **`postprocess_questions`** - ID pattern assumptions
-
-### Low Priority (Already Flexible)
-
-7. **`associate_context`** - Data-driven, good examples
-8. **`generate_cloze_cards`** - Domain is only constraint
+- **`extract_line_ranges`** - "Answer X." format assumption
+- **`match_images_to_questions`** - Layout-specific assumptions
+- **`extract_qa_pairs`** - Choice format (A/B/C/D)
+- **`format_qa_pair`** - Choice format normalization
+- **`associate_context`** - Already data-driven and flexible
+- **`generate_cloze_cards`** - Domain is only constraint
 
 ---
 
