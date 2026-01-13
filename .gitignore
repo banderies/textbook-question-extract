@@ -45,6 +45,9 @@ Thumbs.db
 # Project specific - Large files
 *.pdf
 
+# Source PDFs (copyrighted textbooks)
+source/
+
 # Output files (all generated content, can be regenerated)
 output/
 
