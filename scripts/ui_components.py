@@ -3531,31 +3531,47 @@ def render_generate_step():
                     source_block_id = card.get("source_block_id", "")
                     st.markdown(f"**Block:** `{source_block_id}`")
 
-                    # Find the source block
+                    # Find the source block - check both question_blocks and raw_blocks
                     source_block = None
-                    for ch_key, ch_blocks in question_blocks.items():
-                        for block in ch_blocks:
-                            if block.get("block_id") == source_block_id or block.get("block_label") == source_block_id:
-                                source_block = block
-                                break
+                    raw_blocks = st.session_state.get("raw_blocks", {})
+                    blocks_to_search = [question_blocks, raw_blocks]
+
+                    for blocks_source in blocks_to_search:
                         if source_block:
                             break
+                        for ch_key, ch_blocks in blocks_source.items():
+                            for block in ch_blocks:
+                                if block.get("block_id") == source_block_id or block.get("block_label") == source_block_id:
+                                    source_block = block
+                                    break
+                            if source_block:
+                                break
 
                     if source_block:
                         # Build a combined view of block content
+                        # Handle both new format (question_text_raw/answer_text_raw) and old format
                         source_text_parts = []
-                        if source_block.get("context_text"):
-                            source_text_parts.append(f"CONTEXT:\n{source_block['context_text']}")
-                        if source_block.get("sub_questions"):
-                            for sq in source_block["sub_questions"]:
-                                sq_text = f"\nQ{sq.get('local_id', '')}: {sq.get('question_text', '')}"
-                                if sq.get("specific_answer_text"):
-                                    sq_text += f"\nA: {sq['specific_answer_text']}"
-                                source_text_parts.append(sq_text)
-                        if source_block.get("shared_answer_text"):
-                            source_text_parts.append(f"\nSHARED DISCUSSION:\n{source_block['shared_answer_text']}")
 
-                        source_text = "\n".join(source_text_parts)
+                        # New format: raw text fields
+                        if source_block.get("question_text_raw"):
+                            source_text_parts.append(f"QUESTION:\n{source_block['question_text_raw']}")
+                        if source_block.get("answer_text_raw"):
+                            source_text_parts.append(f"\nANSWER:\n{source_block['answer_text_raw']}")
+
+                        # Old format fallback
+                        if not source_text_parts:
+                            if source_block.get("context_text"):
+                                source_text_parts.append(f"CONTEXT:\n{source_block['context_text']}")
+                            if source_block.get("sub_questions"):
+                                for sq in source_block["sub_questions"]:
+                                    sq_text = f"\nQ{sq.get('local_id', '')}: {sq.get('question_text', '')}"
+                                    if sq.get("specific_answer_text"):
+                                        sq_text += f"\nA: {sq['specific_answer_text']}"
+                                    source_text_parts.append(sq_text)
+                            if source_block.get("shared_answer_text"):
+                                source_text_parts.append(f"\nSHARED DISCUSSION:\n{source_block['shared_answer_text']}")
+
+                        source_text = "\n".join(source_text_parts) if source_text_parts else "(No content found)"
                         st.text_area("Block content:", source_text, height=300, disabled=True, key=f"src_block_{current_idx}")
                     else:
                         st.warning("Source block not found")
