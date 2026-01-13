@@ -15,7 +15,9 @@ This document analyzes each LLM prompt for format-specific assumptions that may 
 | `format_raw_block` | 4 | Block contains context, sub-questions, shared discussion, image distribution | Medium |
 | `generate_cloze_cards_from_block` | 6 | Medical content, raw block text with explanations | Medium |
 
-### Legacy Prompts (Available for Backwards Compatibility)
+### Legacy Prompts (Removed from Codebase)
+
+These prompts have been removed. Analysis preserved for reference:
 
 | Prompt | Critical Assumptions | Flexibility Rating |
 |--------|---------------------|-------------------|
@@ -137,7 +139,7 @@ Formats a raw text block into structured JSON with context, sub-questions, and s
 - Outputs normalized choice format (A, B, C, D)
 
 ### Post-Processing
-The `build_block_aware_image_assignments()` function in `ui_components.py` handles:
+The `build_block_aware_image_assignments()` function in `ui/helpers.py` handles:
 - Building the `image_assignments` dict (first question with each image wins)
 - Setting `context_from` on subsequent sub-questions in the block
 
@@ -178,9 +180,9 @@ Generates cloze deletion flashcards from the raw block content (question + answe
 
 ---
 
-# LEGACY PROMPTS (Available for Backwards Compatibility)
+# LEGACY PROMPTS (Removed)
 
-The following prompts are available but no longer used in the main pipeline.
+The following prompts have been removed from `prompts.yaml`. This analysis is preserved for reference.
 
 ---
 

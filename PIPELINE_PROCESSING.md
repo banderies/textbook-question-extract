@@ -54,7 +54,7 @@ The pipeline has 7 main steps plus a utility step for editing prompts. Tradition
 | `repair_json()` | Traditional | `llm_extraction.py` | Fixes unescaped quotes, control chars, trailing commas |
 | Rate limit handling | Traditional | `llm_extraction.py` | Exponential backoff retry logic |
 | `full_id` generation | Traditional | `llm_extraction.py` | Concatenates `ch{num}_{local_id}` |
-| `build_block_aware_image_assignments()` | Traditional | `ui_components.py:97` | Builds image_assignments dict, sets `context_from` on non-first sub-questions |
+| `build_block_aware_image_assignments()` | Traditional | `ui/helpers.py` | Builds image_assignments dict, sets `context_from` on non-first sub-questions |
 | Page number extraction | Traditional | `llm_extraction.py` | Extracts page numbers from [PAGE N] markers |
 
 **Note**: Image distribution is handled by the LLM during `format_raw_block_llm()`:

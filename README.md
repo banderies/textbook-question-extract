@@ -66,7 +66,10 @@ export ANTHROPIC_API_KEY='sk-ant-...'
 ```
 scripts/
 ├── review_gui.py          # Main Streamlit app
-├── ui_components.py       # UI rendering functions
+├── ui_components.py       # Step rendering functions
+├── ui/                    # Modular UI package
+│   ├── helpers.py        # Utility functions
+│   └── sidebar.py        # Navigation and status
 ├── state_management.py    # Session state and file I/O
 ├── llm_extraction.py      # Claude API and prompt management
 ├── pdf_extraction.py      # PDF text/image extraction

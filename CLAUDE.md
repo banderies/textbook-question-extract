@@ -58,7 +58,11 @@ UTILITY: EDIT PROMPTS (Step 8)
 ```
 scripts/
 ├── review_gui.py          # Main entry point - initializes app and routes to steps
-├── ui_components.py       # All Streamlit UI rendering functions
+├── ui_components.py       # Step rendering functions (Steps 1-7)
+├── ui/                    # Modular UI package
+│   ├── __init__.py       # Package exports
+│   ├── helpers.py        # Utility functions (image handling, sorting, etc.)
+│   └── sidebar.py        # Sidebar navigation and status display
 ├── state_management.py    # Session state, file I/O, path management
 ├── llm_extraction.py      # LLM functions, prompt loading, model management
 ├── pdf_extraction.py      # PDF text/image extraction, chapter assignment
@@ -69,7 +73,9 @@ scripts/
 | Module | Purpose |
 |--------|---------|
 | `review_gui.py` | Entry point, session init, step routing |
-| `ui_components.py` | Render functions for each step, image callbacks, sidebar |
+| `ui_components.py` | Step rendering functions for each pipeline step |
+| `ui/helpers.py` | Utility functions: image handling, sorting, step data management |
+| `ui/sidebar.py` | Sidebar navigation, step completion status, progress display |
 | `state_management.py` | `st.session_state` management, JSON save/load, paths |
 | `llm_extraction.py` | Claude API calls, prompt loading from YAML, model fetching |
 | `pdf_extraction.py` | PyMuPDF extraction, flanking text, chapter assignment |
@@ -119,20 +125,11 @@ All state is persisted to JSON files in `output/<textbook_name>/`:
 ### Editable Prompts (config/prompts.yaml)
 All LLM prompts are stored in YAML for easy editing without code changes:
 
-**Active prompts (current pipeline)**:
 - `identify_chapters` - Find chapter boundaries from page index (Step 2)
 - `identify_question_blocks` - Identify question blocks with line ranges (Step 3)
 - `format_raw_block` - Format blocks into structured Q&A pairs with image distribution (Step 4)
 - `generate_cloze_cards_from_block` - Generate cloze cards from raw block content (Step 6)
-
-**Legacy prompts** (available for backwards compatibility):
-- `extract_qa_pairs` - Single-pass extraction (deprecated)
-- `extract_line_ranges` - Legacy line range extraction
-- `format_qa_pair` - Legacy individual Q&A formatting
-- `match_images_to_questions` - Assign images using flanking text
-- `associate_context` - Link context questions to sub-questions (no longer a separate step)
-- `postprocess_questions` - Legacy post-processing
-- `generate_cloze_cards` - Generate cloze cards from individual question explanations
+- `generate_cloze_cards` - Fallback: generate cloze cards from individual question explanations
 
 ### Dynamic Model Selection
 - Models fetched from Anthropic API via `client.models.list()`
@@ -178,11 +175,11 @@ Block 4:
 - `Image` field: question images (shown on front and back)
 - `AnswerImage` field: answer images (shown only on back, after explanation)
 
-**Post-Processing** (handled by `build_block_aware_image_assignments()` in `ui_components.py`):
+**Post-Processing** (handled by `build_block_aware_image_assignments()` in `ui/helpers.py`):
 1. Build `image_assignments` dict (first question with each image wins)
 2. Set `context_from` on subsequent sub-questions for inheritance
 
-**Image Retrieval** (in `ui_components.py`):
+**Image Retrieval** (in `ui/helpers.py`):
 - `get_images_for_question()` → returns question images from `image_files`
 - `get_answer_images_for_question()` → returns answer images from `answer_image_files`
 
