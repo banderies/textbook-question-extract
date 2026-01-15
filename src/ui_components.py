@@ -187,6 +187,9 @@ def render_source_step():
                     load_settings()
                     st.session_state.qc_progress = load_qc_progress()
 
+                    # Set pdf_path from current source folder and selected PDF
+                    st.session_state.pdf_path = pdf_path
+
                     # Load extracted text from file if it exists
                     text_file_path = os.path.join(get_output_dir(), "extracted_text.txt")
                     if os.path.exists(text_file_path):
