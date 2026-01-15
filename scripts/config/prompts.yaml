@@ -80,6 +80,20 @@ generate_cloze_cards:
     5. Create SEPARATE notes only for unrelated facts or different sentences
     6. Keep sentences SHORT - front-load the topic/category for context
 
+    BRACE SYNTAX - COUNT CAREFULLY:
+    The cloze format is: <b>{{{{c1::answer::hint}}}}</b>
+
+    Step-by-step construction:
+    1. Start with <b>
+    2. Add exactly TWO opening braces: {{{{
+    3. Add cN:: (e.g., c1::, c2::)
+    4. Add your answer text
+    5. Add :: and hint
+    6. Add exactly TWO closing braces: }}}}
+    7. End with </b>
+
+    Verify each cloze: <b> + {{{{ + cN:: + text + :: + hint + }}}} + </b>
+
     HINT CATEGORIES (use these or similar):
     - Anatomical: structure, location, region, pathway, vessel, nerve, muscle, bone
     - Clinical: finding, symptom, sign, presentation, complication
@@ -420,6 +434,20 @@ generate_cloze_cards_from_block:
     - BOLD important terms for visual emphasis
     - Use c1, c2, c3 on same card for related facts from same sentence
     - Create separate cards for unrelated facts
+
+    BRACE SYNTAX - COUNT CAREFULLY:
+    The cloze format is: <b>{{{{c1::answer::hint}}}}</b>
+
+    Step-by-step construction:
+    1. Start with <b>
+    2. Add exactly TWO opening braces: {{{{
+    3. Add cN:: (e.g., c1::, c2::)
+    4. Add your answer text
+    5. Add :: and hint
+    6. Add exactly TWO closing braces: }}}}
+    7. End with </b>
+
+    Verify each cloze: <b> + {{{{ + cN:: + text + :: + hint + }}}} + </b>
 
     Return ONLY a JSON array:
     [
