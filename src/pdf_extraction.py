@@ -749,8 +749,11 @@ def find_page_for_text(search_text: str, pages: list[dict], start_page: int = 1,
     """
     Search pages for text and return the page number where it's found.
 
+    Uses multiple search strategies to handle cases where question text spans
+    multiple paragraphs with question numbers interleaved in the PDF.
+
     Args:
-        search_text: Text to search for (first 80 chars used for matching)
+        search_text: Text to search for
         pages: List of page dicts with 'page' and 'text' keys
         start_page: Minimum page number to search (inclusive)
         end_page: Maximum page number to search (exclusive), None for no limit
@@ -761,23 +764,40 @@ def find_page_for_text(search_text: str, pages: list[dict], start_page: int = 1,
     if not search_text or not pages:
         return None
 
-    # Normalize search text - take first 80 chars, lowercase, collapse whitespace
-    search_normalized = " ".join(search_text[:80].lower().split())
+    # Build list of search candidates in order of specificity
+    search_candidates = []
 
-    for page_dict in pages:
-        page_num = page_dict["page"]
+    # Strategy 1: First 80 chars (original approach)
+    search_candidates.append(" ".join(search_text[:80].lower().split()))
 
-        # Check page range
-        if page_num < start_page:
-            continue
-        if end_page is not None and page_num >= end_page:
-            continue
+    # Strategy 2: First paragraph only (before double newline)
+    # This handles cases where question numbers appear between paragraphs
+    if '\n\n' in search_text:
+        first_para = search_text.split('\n\n')[0]
+        if len(first_para) >= 30:  # Only if reasonably long
+            search_candidates.append(" ".join(first_para[:80].lower().split()))
 
-        # Normalize page text for comparison
-        page_text_normalized = normalize_quotes(" ".join(page_dict["text"].lower().split()))
+    # Strategy 3: First sentence only (before first period+space or question mark)
+    first_sentence = search_text.split('. ')[0] + '.'
+    if len(first_sentence) >= 30 and first_sentence != search_candidates[-1]:
+        search_candidates.append(" ".join(first_sentence[:80].lower().split()))
 
-        if search_normalized in page_text_normalized:
-            return page_num
+    # Try each search candidate
+    for search_normalized in search_candidates:
+        for page_dict in pages:
+            page_num = page_dict["page"]
+
+            # Check page range
+            if page_num < start_page:
+                continue
+            if end_page is not None and page_num >= end_page:
+                continue
+
+            # Normalize page text for comparison
+            page_text_normalized = normalize_quotes(" ".join(page_dict["text"].lower().split()))
+
+            if search_normalized in page_text_normalized:
+                return page_num
 
     return None
 
@@ -851,9 +871,38 @@ def find_pages_for_text(search_text: str, pages: list[dict], start_page: int = 1
     return list(range(first_page, last_page + 1))
 
 
+def get_pages_for_line_range(start_line: int, end_line: int, pages: list[dict]) -> list[int]:
+    """
+    Find all pages that contain lines in the given range.
+
+    Args:
+        start_line: First line number (inclusive)
+        end_line: Last line number (inclusive)
+        pages: List of page dicts with 'page', 'start_line', 'end_line' keys
+
+    Returns:
+        List of page numbers that overlap with the line range
+    """
+    result_pages = []
+    for page in pages:
+        page_start = page.get("start_line", 0)
+        page_end = page.get("end_line", 0)
+        page_num = page.get("page", 0)
+
+        # Check if this page overlaps with the line range
+        # Overlap occurs if: page_start <= end_line AND page_end >= start_line
+        if page_start <= end_line and page_end >= start_line:
+            result_pages.append(page_num)
+
+    return sorted(result_pages)
+
+
 def detect_question_pages(questions: list[dict], pages: list[dict], chapter_start: int, chapter_end: Optional[int] = None) -> list[dict]:
     """
-    Detect page numbers for questions by searching pages.json.
+    Detect page numbers for questions using line numbers or text search.
+
+    Prefers line numbers (question_start/question_end) when available for accuracy.
+    Falls back to text search if line numbers are missing.
 
     Adds 'question_pages' and 'answer_pages' fields (lists) to each question.
     Also adds legacy 'question_page' and 'answer_page' (first page) for compatibility.
@@ -868,36 +917,49 @@ def detect_question_pages(questions: list[dict], pages: list[dict], chapter_star
         Updated questions list with page numbers added
     """
     for q in questions:
-        q_text = q.get("text", "")
-        choices = q.get("choices", {})
+        q_pages = []
+        a_pages = []
 
-        # Find where question text starts
-        first_page = find_page_for_text(q_text, pages, chapter_start, chapter_end)
+        # Try line-number based detection first (more accurate)
+        q_start = q.get("question_start")
+        q_end = q.get("question_end")
+        a_start = q.get("answer_start")
+        a_end = q.get("answer_end")
 
-        # Find where last choice ends (to detect multi-page questions)
-        last_page = first_page
-        if choices:
-            last_choice_letter = sorted(choices.keys())[-1]  # e.g., 'D' or 'E'
-            last_choice_text = choices[last_choice_letter]
-            # Search for the last choice text to find where question ends
-            choice_page = find_page_for_text(last_choice_text, pages, chapter_start, chapter_end)
-            if choice_page and first_page:
-                last_page = max(first_page, choice_page)
+        if q_start is not None and q_end is not None:
+            # Use line numbers to find pages
+            q_pages = get_pages_for_line_range(q_start, q_end, pages)
 
-        # Build page range
-        if first_page and last_page:
-            q_pages = list(range(first_page, last_page + 1))
-        elif first_page:
-            q_pages = [first_page]
-        else:
-            q_pages = []
+        if a_start is not None and a_end is not None:
+            # Use line numbers to find answer pages
+            a_pages = get_pages_for_line_range(a_start, a_end, pages)
+
+        # Fall back to text search if line-based detection failed
+        if not q_pages:
+            q_text = q.get("text", "")
+            choices = q.get("choices", {})
+
+            first_page = find_page_for_text(q_text, pages, chapter_start, chapter_end)
+            last_page = first_page
+
+            if choices:
+                last_choice_letter = sorted(choices.keys())[-1]
+                last_choice_text = choices[last_choice_letter]
+                choice_page = find_page_for_text(last_choice_text, pages, chapter_start, chapter_end)
+                if choice_page and first_page:
+                    last_page = max(first_page, choice_page)
+
+            if first_page and last_page:
+                q_pages = list(range(first_page, last_page + 1))
+            elif first_page:
+                q_pages = [first_page]
+
+        if not a_pages:
+            explanation = q.get("explanation", "")
+            a_pages = find_pages_for_text(explanation, pages, chapter_start, chapter_end)
 
         q["question_pages"] = q_pages
         q["question_page"] = q_pages[0] if q_pages else None
-
-        # Find pages for answer/explanation text
-        explanation = q.get("explanation", "")
-        a_pages = find_pages_for_text(explanation, pages, chapter_start, chapter_end)
         q["answer_pages"] = a_pages
         q["answer_page"] = a_pages[0] if a_pages else None
 

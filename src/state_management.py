@@ -124,6 +124,8 @@ def load_global_settings():
             settings = json.load(f)
             if "source_dir" in settings:
                 st.session_state.source_dir = settings["source_dir"]
+            if "last_selected_pdf" in settings:
+                st.session_state.last_selected_pdf = settings["last_selected_pdf"]
 
 
 def save_global_settings():
@@ -131,6 +133,7 @@ def save_global_settings():
     os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
     settings = {
         "source_dir": st.session_state.get("source_dir", SOURCE_DIR),
+        "last_selected_pdf": st.session_state.get("last_selected_pdf", ""),
         "last_saved": datetime.now().isoformat()
     }
     with open(get_global_settings_file(), "w") as f:

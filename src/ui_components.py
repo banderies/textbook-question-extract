@@ -121,7 +121,13 @@ def render_source_step():
     pdf_options = sorted([f.name for f in pdf_files])
     available_textbooks = get_available_textbooks()
 
-    selected_pdf = st.selectbox("Select PDF file:", pdf_options)
+    # Default to last selected PDF if available
+    last_pdf = st.session_state.get("last_selected_pdf", "")
+    default_idx = 0
+    if last_pdf in pdf_options:
+        default_idx = pdf_options.index(last_pdf)
+
+    selected_pdf = st.selectbox("Select PDF file:", pdf_options, index=default_idx)
 
     if selected_pdf:
         pdf_path = f"{source_dir}/{selected_pdf}"
@@ -137,6 +143,8 @@ def render_source_step():
             btn_label = "Load PDF (Fresh Start)" if has_existing_data else "Load PDF"
             if st.button(btn_label, type="primary"):
                 st.session_state.current_pdf = selected_pdf
+                st.session_state.last_selected_pdf = selected_pdf
+                save_global_settings()
                 clear_session_data()
                 reset_logger()  # Reset logger for new PDF
 
@@ -181,6 +189,8 @@ def render_source_step():
             if has_existing_data:
                 if st.button("Load Existing Progress"):
                     st.session_state.current_pdf = selected_pdf
+                    st.session_state.last_selected_pdf = selected_pdf
+                    save_global_settings()
                     clear_session_data()
                     reset_logger()  # Reset logger for loaded textbook
                     load_saved_data()
