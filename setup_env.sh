@@ -165,7 +165,7 @@ setup_mode() {
     echo "  export ANTHROPIC_API_KEY='sk-ant-...'"
     echo ""
     echo "Run the extraction pipeline:"
-    echo "  python scripts/agentic_qa_extractor.py docling/your_book.md"
+    echo "  streamlit run src/review_gui.py"
 }
 
 # Parse arguments

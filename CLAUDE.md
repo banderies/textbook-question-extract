@@ -56,7 +56,7 @@ UTILITY: EDIT PROMPTS (Step 8)
 ### Modular Code Structure
 
 ```
-scripts/
+src/
 ├── review_gui.py          # Main entry point - initializes app and routes to steps
 ├── ui_components.py       # Step rendering functions (Steps 1-7)
 ├── ui/                    # Modular UI package
@@ -92,7 +92,7 @@ export ANTHROPIC_API_KEY='sk-ant-...'
 
 ### Run the GUI
 ```bash
-streamlit run scripts/review_gui.py
+streamlit run src/review_gui.py
 ```
 
 ## Data Files

@@ -15,12 +15,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 
 from state_management import (
-    SOURCE_DIR, get_pdf_slug, get_output_dir, get_images_dir,
+    SOURCE_DIR, get_pdf_slug, get_output_dir, get_images_dir, get_source_dir,
     get_available_textbooks, clear_session_data, load_saved_data,
     load_settings, load_qc_progress, save_settings, save_chapters,
     save_questions, save_raw_questions, save_images, save_pages, save_image_assignments,
     save_questions_merged, save_image_assignments_merged, save_qc_progress,
-    get_raw_questions_file, get_raw_blocks_file, save_raw_blocks, save_question_blocks
+    get_raw_questions_file, get_raw_blocks_file, save_raw_blocks, save_question_blocks,
+    save_global_settings
 )
 from pdf_extraction import (
     extract_images_from_pdf, assign_chapters_to_images,
@@ -69,51 +70,61 @@ def render_source_step():
             st.success("All data cleared")
             st.rerun()
 
-    pdf_files = list(Path(SOURCE_DIR).glob("*.pdf")) if os.path.exists(SOURCE_DIR) else []
+    # Folder selection section
+    st.subheader("Source Folder")
+
+    current_source = st.session_state.get("source_dir", SOURCE_DIR)
+
+    col_path, col_btn = st.columns([4, 1])
+    with col_path:
+        st.text_input("Current folder:", value=current_source, disabled=True, key="source_folder_display")
+    with col_btn:
+        if st.button("Browse...", key="browse_folder_btn"):
+            # Open native macOS Finder folder picker via AppleScript
+            import subprocess
+
+            # Set initial directory for the dialog
+            initial_dir = current_source if os.path.exists(current_source) else str(Path.home())
+
+            script = f'''
+            set defaultFolder to POSIX file "{initial_dir}" as alias
+            try
+                set selectedFolder to choose folder with prompt "Select Source Folder" default location defaultFolder
+                return POSIX path of selectedFolder
+            on error
+                return ""
+            end try
+            '''
+
+            result = subprocess.run(
+                ['osascript', '-e', script],
+                capture_output=True,
+                text=True
+            )
+
+            selected = result.stdout.strip()
+            if selected:
+                st.session_state.source_dir = selected.rstrip('/')
+                save_global_settings()
+                st.rerun()
+
+    st.markdown("---")
+
+    # Use selected source directory for PDF scanning
+    source_dir = get_source_dir()
+    pdf_files = list(Path(source_dir).glob("*.pdf")) if os.path.exists(source_dir) else []
 
     if not pdf_files:
-        st.warning(f"No PDF files found in '{SOURCE_DIR}/' directory. Please add a PDF file.")
+        st.warning(f"No PDF files found in '{source_dir}'. Please select a folder containing PDF files.")
         return
 
     pdf_options = sorted([f.name for f in pdf_files])
     available_textbooks = get_available_textbooks()
 
-    if available_textbooks:
-        st.subheader("Load Existing Textbook")
-        st.caption("These textbooks have saved progress:")
-
-        textbook_col1, textbook_col2 = st.columns([3, 1])
-        with textbook_col1:
-            selected_textbook = st.selectbox(
-                "Select saved textbook:",
-                available_textbooks,
-                format_func=lambda x: x.replace('_', ' '),
-                key="textbook_selector"
-            )
-        with textbook_col2:
-            if st.button("Load Textbook", type="primary"):
-                for pdf_name in pdf_options:
-                    if get_pdf_slug(pdf_name) == selected_textbook:
-                        st.session_state.current_pdf = pdf_name
-                        break
-                else:
-                    st.session_state.current_pdf = selected_textbook + ".pdf"
-
-                clear_session_data()
-                reset_logger()  # Reset logger for new textbook
-                load_saved_data()
-                load_settings()
-                st.session_state.qc_progress = load_qc_progress()
-                st.success(f"Loaded: {selected_textbook}")
-                st.rerun()
-
-        st.markdown("---")
-        st.subheader("Start New Textbook")
-
     selected_pdf = st.selectbox("Select PDF file:", pdf_options)
 
     if selected_pdf:
-        pdf_path = f"{SOURCE_DIR}/{selected_pdf}"
+        pdf_path = f"{source_dir}/{selected_pdf}"
         output_slug = get_pdf_slug(selected_pdf)
         st.info(f"Selected: {pdf_path}")
         st.caption(f"Output folder: output/{output_slug}/")

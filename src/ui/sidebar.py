@@ -23,7 +23,7 @@ def get_step_completion_status() -> dict[str, bool]:
     return {
         "source": st.session_state.pages is not None and len(st.session_state.pages) > 0,
         "chapters": st.session_state.chapters is not None and len(st.session_state.chapters) > 0,
-        "questions": bool(st.session_state.get("raw_questions")) and sum(len(qs) for qs in st.session_state.raw_questions.values()) > 0,
+        "questions": bool(st.session_state.get("raw_blocks")) and sum(len(bs) for bs in st.session_state.raw_blocks.values()) > 0,
         "format": bool(st.session_state.questions) and sum(len(qs) for qs in st.session_state.questions.values()) > 0,
         "qc": qc_complete,
         "generate": generate_complete,
@@ -98,11 +98,11 @@ def render_sidebar():
     else:
         st.sidebar.info("Images: Not extracted")
 
-    raw_q_count = sum(len(qs) for qs in st.session_state.get("raw_questions", {}).values())
-    if raw_q_count > 0:
-        st.sidebar.success(f"Raw Q&A: {raw_q_count}")
+    raw_block_count = sum(len(bs) for bs in st.session_state.get("raw_blocks", {}).values())
+    if raw_block_count > 0:
+        st.sidebar.success(f"Raw Blocks: {raw_block_count}")
     else:
-        st.sidebar.info("Raw Q&A: Not extracted")
+        st.sidebar.info("Raw Blocks: Not extracted")
 
     q_count = sum(len(qs) for qs in st.session_state.questions.values())
     if q_count > 0:

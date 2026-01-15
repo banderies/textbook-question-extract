@@ -13,7 +13,7 @@ conda activate anki-extractor
 export ANTHROPIC_API_KEY='sk-ant-...'
 
 # Run the GUI
-streamlit run scripts/review_gui.py
+streamlit run src/review_gui.py
 ```
 
 Open http://localhost:8501 and follow the 7-step workflow:
@@ -64,7 +64,7 @@ export ANTHROPIC_API_KEY='sk-ant-...'
 ## Project Structure
 
 ```
-scripts/
+src/
 ├── review_gui.py          # Main Streamlit app
 ├── ui_components.py       # Step rendering functions
 ├── ui/                    # Modular UI package

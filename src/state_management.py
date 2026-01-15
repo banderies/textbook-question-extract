@@ -106,6 +106,37 @@ def get_question_blocks_file() -> str:
     return f"{get_output_dir()}/question_blocks.json"
 
 
+def get_source_dir() -> str:
+    """Get current source directory for PDF files."""
+    return st.session_state.get("source_dir", SOURCE_DIR)
+
+
+def get_global_settings_file() -> str:
+    """Get path for global settings (persists across all textbooks)."""
+    return f"{BASE_OUTPUT_DIR}/global_settings.json"
+
+
+def load_global_settings():
+    """Load global settings that persist across all textbooks."""
+    settings_file = get_global_settings_file()
+    if os.path.exists(settings_file):
+        with open(settings_file) as f:
+            settings = json.load(f)
+            if "source_dir" in settings:
+                st.session_state.source_dir = settings["source_dir"]
+
+
+def save_global_settings():
+    """Save global settings that persist across all textbooks."""
+    os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
+    settings = {
+        "source_dir": st.session_state.get("source_dir", SOURCE_DIR),
+        "last_saved": datetime.now().isoformat()
+    }
+    with open(get_global_settings_file(), "w") as f:
+        json.dump(settings, f, indent=2)
+
+
 def get_available_textbooks() -> list[str]:
     """Get list of textbooks that have output data."""
     textbooks = []
@@ -125,6 +156,8 @@ def init_session_state():
     """Initialize session state variables and auto-load saved data."""
     is_fresh_init = "initialized" not in st.session_state
 
+    if "source_dir" not in st.session_state:
+        st.session_state.source_dir = SOURCE_DIR  # Default to "source"
     if "current_pdf" not in st.session_state:
         st.session_state.current_pdf = None
     if "pages" not in st.session_state:
@@ -164,6 +197,8 @@ def init_session_state():
 
     if is_fresh_init:
         st.session_state.initialized = True
+        # Load global settings (like source_dir) on fresh init
+        load_global_settings()
 
 
 def clear_session_data():
@@ -212,6 +247,8 @@ def load_settings():
                 st.session_state.qc_selected_idx = settings["qc_selected_idx"]
             if "pdf_path" in settings:
                 st.session_state.pdf_path = settings["pdf_path"]
+            if "source_dir" in settings:
+                st.session_state.source_dir = settings["source_dir"]
 
 
 def load_saved_data():
@@ -385,6 +422,7 @@ def save_settings():
         "qc_selected_idx": st.session_state.qc_selected_idx,
         "current_pdf": st.session_state.get("current_pdf", ""),
         "pdf_path": st.session_state.get("pdf_path", ""),
+        "source_dir": st.session_state.get("source_dir", SOURCE_DIR),
         "last_saved": datetime.now().isoformat()
     }
     with open(get_settings_file(), "w") as f:
