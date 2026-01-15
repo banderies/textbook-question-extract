@@ -1856,7 +1856,8 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             continue
 
         # Create chapter sub-deck for extracted questions
-        ch_deck_name = f"{book_name}::{ch_num}. {ch_title}::Extracted"
+        # Zero-pad chapter number for proper sorting (01, 02, ... 10, 11)
+        ch_deck_name = f"{book_name}::{ch_num:02d}. {ch_title}::Extracted"
         ch_deck_id = stable_id(ch_deck_name)
         ch_deck = genanki.Deck(ch_deck_id, ch_deck_name)
 
@@ -1956,7 +1957,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
             note = genanki.Note(
                 model=model,
                 fields=[q_text, choices_html, correct, explanation, image_html, answer_image_html, ch_title, source_ref],
-                tags=[f"chapter{ch_num}"]
+                tags=[f"chapter{ch_num:02d}"]
             )
             ch_deck.notes.append(note)
 
@@ -2006,7 +2007,8 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                     continue
 
                 # Create chapter::Generated sub-deck
-                gen_deck_name = f"{book_name}::{ch_num}. {ch_title}::Generated"
+                # Zero-pad chapter number for proper sorting
+                gen_deck_name = f"{book_name}::{ch_num:02d}. {ch_title}::Generated"
                 gen_deck_id = stable_id(gen_deck_name)
                 gen_deck = genanki.Deck(gen_deck_id, gen_deck_name)
 
@@ -2070,7 +2072,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                     cloze_note = genanki.Note(
                         model=cloze_model,
                         fields=[cloze_text, extra, source_ref],
-                        tags=[f"chapter{ch_num}", "generated", card.get('category', 'general')]
+                        tags=[f"chapter{ch_num:02d}", "generated", card.get('category', 'general')]
                     )
                     gen_deck.notes.append(cloze_note)
 
