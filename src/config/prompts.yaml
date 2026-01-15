@@ -80,6 +80,24 @@ generate_cloze_cards:
     5. Create SEPARATE notes only for unrelated facts or different sentences
     6. Keep sentences SHORT - front-load the topic/category for context
 
+    CRITICAL - COMPLEMENTARY/OPPOSITE PAIRS:
+    When two clozes are opposites or complements, use the SAME cloze number so both are
+    hidden together. Otherwise the user can infer one answer from the other.
+
+    BAD - Different cloze numbers allow cheating:
+    "In ependymoma, {{{{c1::younger::age}}}} patients → posterior fossa, {{{{c2::older::age}}}} → supratentorial."
+    (If user sees "younger" hidden but "older" shown, they can guess the answer)
+
+    GOOD - Same cloze number hides both, requiring complete recall:
+    "In ependymoma, {{{{c1::younger::age}}}} patients → posterior fossa, {{{{c1::older::age}}}} → supratentorial."
+
+    Apply this rule to ANY complementary pairs:
+    - Age: younger/older, pediatric/adult
+    - Direction: increased/decreased, higher/lower, proximal/distal
+    - Location: anterior/posterior, medial/lateral, superior/inferior
+    - Time: early/late, acute/chronic
+    - Size: larger/smaller, macro/micro
+
     BRACE SYNTAX - COUNT CAREFULLY:
     The cloze format is: <b>{{{{c1::answer::hint}}}}</b>
 
@@ -308,9 +326,26 @@ format_raw_block:
        - question_text: The question WITHOUT choices
        - choices: The A/B/C/D options
        - correct_answer: The letter (find in answer text: "Answer A" or "2a Answer B")
-       - explanation: The FULL explanation text for this question from the answer section (verbatim, do not summarize)
+       - explanation: See EXPLANATION STRUCTURE below
 
-    6. IMAGE DISTRIBUTION ([IMAGE: filename.jpeg] markers):
+    6. EXPLANATION STRUCTURE (IMPORTANT):
+       The answer section often has TWO parts:
+       A. SPECIFIC ANSWERS: Each sub-question has its own answer line (e.g., "2a Answer C. [explanation]", "2b Answer A. [explanation]")
+       B. SHARED DISCUSSION: Content that applies to all sub-questions (Imaging Findings, Discussion, Differential Diagnosis, References)
+
+       For each sub-question's `explanation` field, include:
+       1. That sub-question's SPECIFIC answer text VERBATIM (e.g., for 2a: "Answer C. MRI of brain... [full text]")
+       2. The SHARED discussion content (Imaging Findings, Discussion, etc.) - this goes to ALL sub-questions
+       3. Do NOT include other sub-questions' specific answers (e.g., 2a should NOT contain "2b Answer A...")
+
+       Example for block with 2a and 2b:
+       - Raw answer text: "2a Answer C. MRI explanation... 2b Answer A. Glioblastoma explanation... [Imaging Findings]... [Discussion]..."
+       - 2a.explanation = "Answer C. MRI explanation... [Imaging Findings]... [Discussion]..." (2a's answer + shared, NO 2b answer)
+       - 2b.explanation = "Answer A. Glioblastoma explanation... [Imaging Findings]... [Discussion]..." (2b's answer + shared, NO 2a answer)
+
+       For STANDALONE questions (no sub-parts), include the entire answer section verbatim.
+
+    7. IMAGE DISTRIBUTION ([IMAGE: filename.jpeg] markers):
        Images appear in TWO sections - track them separately:
 
        A. QUESTION IMAGES (from RAW QUESTION TEXT):
@@ -335,11 +370,12 @@ format_raw_block:
        - Question section images → treat as context (all sub-questions)
        - Answer section images → put in shared_discussion.image_files
 
-    7. SHARED DISCUSSION (from answer section):
+    8. SHARED DISCUSSION (from answer section):
        - Imaging Findings, Discussion, Differential Diagnosis, References
-       - This content applies to ALL questions in the block
+       - This is captured BOTH in shared_discussion AND included in each sub-question's explanation
+       - The shared_discussion field is for reference; the explanation field is what gets displayed
 
-    8. PAGE NUMBERS (from [PAGE N] markers):
+    9. PAGE NUMBERS (from [PAGE N] markers):
        - Look for [PAGE N] markers in the text to determine page numbers
        - question_pages: List of page numbers where the question appears (from RAW QUESTION TEXT)
        - answer_pages: List of page numbers where the answer appears (from RAW ANSWER TEXT)
@@ -359,7 +395,7 @@ format_raw_block:
           "question_text": "Question text only, no choices",
           "choices": {{"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"}},
           "correct_answer": "B",
-          "explanation": "Full verbatim explanation text from the answer section for this question",
+          "explanation": "Answer B. [2a's specific answer verbatim]... [Imaging Findings verbatim]... [Discussion verbatim]... (includes shared content, excludes other sub-question answers)",
           "image_files": ["question_image.jpeg"],
           "answer_image_files": ["answer_image.jpeg"],
           "question_pages": [14, 15],
@@ -435,6 +471,18 @@ generate_cloze_cards_from_block:
     - BOLD important terms for visual emphasis
     - Use c1, c2, c3 on same card for related facts from same sentence
     - Create separate cards for unrelated facts
+
+    CRITICAL - COMPLEMENTARY/OPPOSITE PAIRS:
+    When two clozes are opposites or complements, use the SAME cloze number so both are
+    hidden together. Otherwise the user can infer one answer from the other.
+
+    BAD: "{{{{c1::younger::age}}}} patients → posterior fossa, {{{{c2::older::age}}}} → supratentorial"
+    (User sees "older" and can guess "younger")
+
+    GOOD: "{{{{c1::younger::age}}}} patients → posterior fossa, {{{{c1::older::age}}}} → supratentorial"
+    (Both hidden together, must recall complete relationship)
+
+    Apply to: younger/older, increased/decreased, proximal/distal, anterior/posterior, early/late, etc.
 
     BRACE SYNTAX - COUNT CAREFULLY:
     The cloze format is: <b>{{{{c1::answer::hint}}}}</b>
