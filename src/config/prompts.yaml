@@ -80,23 +80,49 @@ generate_cloze_cards:
     5. Create SEPARATE notes only for unrelated facts or different sentences
     6. Keep sentences SHORT - front-load the topic/category for context
 
-    CRITICAL - COMPLEMENTARY/OPPOSITE PAIRS:
+    CRITICAL - PREVENTING ANSWER INFERENCE:
+    Review each card for ways a user could INFER the answer without true recall.
+
+    PROBLEM 1: COMPLEMENTARY/OPPOSITE PAIRS
     When two clozes are opposites or complements, use the SAME cloze number so both are
     hidden together. Otherwise the user can infer one answer from the other.
 
-    BAD - Different cloze numbers allow cheating:
-    "In ependymoma, {{{{c1::younger::age}}}} patients → posterior fossa, {{{{c2::older::age}}}} → supratentorial."
+    BAD: "In ependymoma, {{{{c1::younger::age}}}} patients → posterior fossa, {{{{c2::older::age}}}} → supratentorial."
     (If user sees "younger" hidden but "older" shown, they can guess the answer)
 
-    GOOD - Same cloze number hides both, requiring complete recall:
-    "In ependymoma, {{{{c1::younger::age}}}} patients → posterior fossa, {{{{c1::older::age}}}} → supratentorial."
+    GOOD: "In ependymoma, {{{{c1::younger::age}}}} patients → posterior fossa, {{{{c1::older::age}}}} → supratentorial."
+    (Both hidden together, must recall complete relationship)
 
-    Apply this rule to ANY complementary pairs:
-    - Age: younger/older, pediatric/adult
-    - Direction: increased/decreased, higher/lower, proximal/distal
-    - Location: anterior/posterior, medial/lateral, superior/inferior
-    - Time: early/late, acute/chronic
-    - Size: larger/smaller, macro/micro
+    Apply to: younger/older, pediatric/adult, increased/decreased, higher/lower, proximal/distal,
+    anterior/posterior, medial/lateral, superior/inferior, early/late, acute/chronic, larger/smaller, etc.
+
+    PROBLEM 2: SEQUENTIAL/ORDINAL VALUES
+    When clozes contain values from an obvious sequence, seeing one reveals the other.
+
+    BAD: "Classic ependymomas are WHO grade {{{{c1::II::grade number}}}}, while anaplastic ependymomas are WHO grade {{{{c2::III::grade number}}}}."
+    (User sees "II" and knows the other must be "III" from the WHO grade sequence I-IV)
+
+    GOOD: "Classic ependymomas are WHO grade {{{{c1::II::grade number}}}}, while anaplastic ependymomas are WHO grade {{{{c1::III::grade number}}}}."
+    (Both hidden together - user must know BOTH grades)
+
+    Apply to: WHO grades (I/II/III/IV), TNM stages, numbered classifications, Roman numerals, etc.
+
+    PROBLEM 3: SEMANTICALLY RELATED TERMS
+    When non-clozed text contains terms anatomically or conceptually tied to the clozed answer.
+
+    BAD: "Central neurocytomas are predominantly located in the {{{{c1::lateral ventricle::location}}}} attached to the {{{{c2::septum pellucidum::structure}}}} or ventricular wall."
+    (The terms "septum pellucidum" and "ventricular wall" are strongly associated with "lateral ventricle" - a knowledgeable user can infer c1 from the surrounding anatomy)
+
+    GOOD - Option A (cloze both related terms):
+    "Central neurocytomas are predominantly located in the {{{{c1::lateral ventricle::location}}}} attached to the {{{{c1::septum pellucidum::structure}}}} or ventricular wall."
+    (Hiding both removes the contextual hint)
+
+    GOOD - Option B (restructure to avoid leakage):
+    "<b>Central neurocytomas</b> attach to the {{{{c1::septum pellucidum::structure}}}} within the lateral ventricle."
+    (Single fact, no inference possible)
+
+    When creating cards, ask: "Could a user guess this answer from OTHER information in the sentence?"
+    If yes, either (a) use the same cloze number for related terms, or (b) restructure the card.
 
     BRACE SYNTAX - COUNT CAREFULLY:
     The cloze format is: <b>{{{{c1::answer::hint}}}}</b>
@@ -472,7 +498,10 @@ generate_cloze_cards_from_block:
     - Use c1, c2, c3 on same card for related facts from same sentence
     - Create separate cards for unrelated facts
 
-    CRITICAL - COMPLEMENTARY/OPPOSITE PAIRS:
+    CRITICAL - PREVENTING ANSWER INFERENCE:
+    Review each card for ways a user could INFER the answer without true recall.
+
+    PROBLEM 1: COMPLEMENTARY/OPPOSITE PAIRS
     When two clozes are opposites or complements, use the SAME cloze number so both are
     hidden together. Otherwise the user can infer one answer from the other.
 
@@ -483,6 +512,34 @@ generate_cloze_cards_from_block:
     (Both hidden together, must recall complete relationship)
 
     Apply to: younger/older, increased/decreased, proximal/distal, anterior/posterior, early/late, etc.
+
+    PROBLEM 2: SEQUENTIAL/ORDINAL VALUES
+    When clozes contain values from an obvious sequence, seeing one reveals the other.
+
+    BAD: "Classic ependymomas are WHO grade {{{{c1::II::grade number}}}}, while anaplastic ependymomas are WHO grade {{{{c2::III::grade number}}}}."
+    (User sees "II" and knows the other must be "III" from the WHO grade sequence I-IV)
+
+    GOOD: "Classic ependymomas are WHO grade {{{{c1::II::grade number}}}}, while anaplastic ependymomas are WHO grade {{{{c1::III::grade number}}}}."
+    (Both hidden together - user must know BOTH grades)
+
+    Apply to: WHO grades (I/II/III/IV), TNM stages, numbered classifications, Roman numerals, etc.
+
+    PROBLEM 3: SEMANTICALLY RELATED TERMS
+    When non-clozed text contains terms anatomically or conceptually tied to the clozed answer.
+
+    BAD: "Central neurocytomas are predominantly located in the {{{{c1::lateral ventricle::location}}}} attached to the {{{{c2::septum pellucidum::structure}}}} or ventricular wall."
+    (The terms "septum pellucidum" and "ventricular wall" are strongly associated with "lateral ventricle" - a knowledgeable user can infer c1 from the surrounding anatomy)
+
+    GOOD - Option A (cloze both related terms):
+    "Central neurocytomas are predominantly located in the {{{{c1::lateral ventricle::location}}}} attached to the {{{{c1::septum pellucidum::structure}}}} or ventricular wall."
+    (Hiding both removes the contextual hint)
+
+    GOOD - Option B (restructure to avoid leakage):
+    "<b>Central neurocytomas</b> attach to the {{{{c1::septum pellucidum::structure}}}} within the lateral ventricle."
+    (Single fact, no inference possible)
+
+    When creating cards, ask: "Could a user guess this answer from OTHER information in the sentence?"
+    If yes, either (a) use the same cloze number for related terms, or (b) restructure the card.
 
     BRACE SYNTAX - COUNT CAREFULLY:
     The cloze format is: <b>{{{{c1::answer::hint}}}}</b>
