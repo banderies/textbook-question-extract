@@ -7,6 +7,7 @@ Contains sidebar navigation and status display.
 import streamlit as st
 
 from state_management import get_pdf_slug, save_settings
+from cost_tracking import get_session_summary, format_cost, format_tokens
 
 
 def get_step_completion_status() -> dict[str, bool]:
@@ -121,3 +122,11 @@ def render_sidebar():
     reviewed = len(st.session_state.qc_progress.get("reviewed", {}))
     if reviewed > 0:
         st.sidebar.success(f"QC'd: {reviewed}/{q_count}")
+
+    # API Usage summary
+    summary = get_session_summary()
+    if summary["total_cost"] > 0:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("API Usage")
+        st.sidebar.metric("Session Cost", format_cost(summary["total_cost"]))
+        st.sidebar.caption(f"{format_tokens(summary['total_input_tokens'])} in / {format_tokens(summary['total_output_tokens'])} out")

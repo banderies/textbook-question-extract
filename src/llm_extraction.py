@@ -15,6 +15,8 @@ from datetime import datetime
 
 import yaml
 
+from cost_tracking import track_api_call, save_cost_tracking
+
 # =============================================================================
 # Logging Setup
 # =============================================================================
@@ -445,6 +447,9 @@ def identify_chapters_llm(client, pages: list[dict], model_id: str) -> list[dict
             f"output={usage['output_tokens']:,}, stop={usage['stop_reason']}"
         )
 
+        # Track API cost
+        track_api_call("identify_chapters", model_id, usage)
+
         if "```" in response_text:
             match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
             if match:
@@ -610,6 +615,9 @@ def generate_cloze_cards_llm(
                 f"out={usage['output_tokens']}"
             )
 
+            # Track API cost
+            track_api_call("generate_cloze", model_id, usage)
+
             # Extract JSON from markdown code blocks if present
             if "```" in response_text:
                 match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
@@ -725,6 +733,9 @@ def identify_question_blocks_llm(
             f"input={input_tokens:,}, output={output_tokens:,}, stop={stop_reason}"
         )
 
+        # Track API cost
+        track_api_call("identify_blocks", model_id, usage)
+
         if stop_reason == "max_tokens":
             logger.warning(f"{log_prefix}: Response may be truncated")
 
@@ -813,6 +824,9 @@ def format_raw_block_llm(
                 f"{log_prefix}: in={usage['input_tokens']}, "
                 f"out={usage['output_tokens']}"
             )
+
+            # Track API cost
+            track_api_call("format_blocks", model_id, usage)
 
             # Extract JSON from markdown code blocks if present
             if "```" in response_text:
@@ -1001,6 +1015,9 @@ def generate_cloze_cards_from_block_llm(
                 f"{log_prefix}: in={usage['input_tokens']}, "
                 f"out={usage['output_tokens']}"
             )
+
+            # Track API cost
+            track_api_call("generate_cloze_block", model_id, usage)
 
             # Extract JSON from markdown code blocks if present
             if "```" in response_text:

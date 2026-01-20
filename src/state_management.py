@@ -14,6 +14,7 @@ import streamlit as st
 
 from pdf_extraction import assign_chapters_to_images
 from llm_extraction import DEFAULT_MODEL_NAME
+from cost_tracking import init_cost_tracker, load_cost_tracking, save_cost_tracking, reset_cost_tracker
 
 # =============================================================================
 # Path Constants
@@ -198,6 +199,9 @@ def init_session_state():
     if "question_blocks" not in st.session_state:
         st.session_state.question_blocks = {}
 
+    # Initialize cost tracker
+    init_cost_tracker()
+
     if is_fresh_init:
         st.session_state.initialized = True
         # Load global settings (like source_dir) on fresh init
@@ -221,6 +225,8 @@ def clear_session_data():
     st.session_state.generated_questions = {"metadata": {}, "generated_cards": {}}
     st.session_state.raw_blocks = {}
     st.session_state.question_blocks = {}
+    # Reset cost tracker for new PDF
+    reset_cost_tracker()
 
 
 # =============================================================================
@@ -310,6 +316,9 @@ def load_saved_data():
     if os.path.exists(question_blocks_file):
         with open(question_blocks_file) as f:
             st.session_state.question_blocks = json.load(f)
+
+    # Load cost tracking data
+    load_cost_tracking(get_output_dir())
 
     # Assign chapters to images if chapters exist but images don't have chapter info
     if st.session_state.chapters and st.session_state.images:

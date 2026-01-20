@@ -36,6 +36,10 @@ from llm_extraction import (
     get_extraction_logger, reset_logger,
     identify_question_blocks_llm, format_raw_block_llm
 )
+from cost_tracking import (
+    get_session_summary, get_step_cost, format_cost_display,
+    format_cost, format_tokens, save_cost_tracking
+)
 
 # Import from modular ui package
 from ui.helpers import (
@@ -53,6 +57,34 @@ from ui.sidebar import render_sidebar
 
 # Note: Helper functions and sidebar are now in ui/helpers.py and ui/sidebar.py
 # They are imported above from the ui package
+
+
+# =============================================================================
+# Cost Display Helper
+# =============================================================================
+
+def render_cost_metrics(step_name: str = None, show_session: bool = False):
+    """
+    Render cost metrics display.
+
+    Args:
+        step_name: If provided, show cost for specific step. Otherwise show session total.
+        show_session: If True, also show session totals alongside step cost.
+    """
+    if step_name:
+        step_data = get_step_cost(step_name)
+        input_tokens = step_data["input"]
+        output_tokens = step_data["output"]
+        cost = step_data["cost"]
+        call_count = step_data["call_count"]
+
+        if call_count > 0:
+            st.caption(f"Step cost: {format_tokens(input_tokens)} in / {format_tokens(output_tokens)} out | {format_cost(cost)} ({call_count} calls)")
+
+    if show_session:
+        summary = get_session_summary()
+        if summary["total_cost"] > 0:
+            st.caption(f"Session total: {format_cost(summary['total_cost'])}")
 
 
 # =============================================================================
@@ -302,7 +334,11 @@ def render_chapters_step():
                         )
                         save_images()
 
+                    # Save cost tracking data
+                    save_cost_tracking(get_output_dir())
+
                 st.success(f"Found {len(chapters)} chapters")
+                render_cost_metrics("identify_chapters")
                 play_completion_sound()
                 st.rerun()
     elif has_chapters:
@@ -489,8 +525,10 @@ def render_questions_step():
                 if raw_blocks:
                     st.session_state.raw_blocks[ch_key] = raw_blocks
                     save_raw_blocks()
+                    save_cost_tracking(get_output_dir())
                     progress_text.empty()
                     st.success(f"Extracted {len(raw_blocks)} blocks from Chapter {ch_num}")
+                    render_cost_metrics("identify_blocks")
                     play_completion_sound()
                 else:
                     progress_text.empty()
@@ -639,11 +677,13 @@ def render_questions_step():
 
             st.session_state.raw_blocks = block_results
             save_raw_blocks()
+            save_cost_tracking(get_output_dir())
             status_text.text("Done!")
             chapter_status.empty()
 
             total_blocks = sum(len(bs) for bs in block_results.values())
             st.success(f"Extracted {total_blocks} blocks from {total_chapters} chapters")
+            render_cost_metrics("identify_blocks")
             play_completion_sound()
             st.info("**Next:** Go to **Step 4: Format Questions** to format the raw blocks.")
             st.rerun()
@@ -1022,8 +1062,10 @@ def render_format_step():
             save_questions()
             save_image_assignments()
 
+            save_cost_tracking(get_output_dir())
             status_text.text("Done!")
             st.success(f"Formatted {total} {'blocks' if has_v2_blocks else 'Q&A pairs'} from Chapter {selected_ch_num}")
+            render_cost_metrics("format_blocks")
             play_completion_sound()
             st.rerun()
 
@@ -1109,8 +1151,10 @@ def render_format_step():
             save_question_blocks()
             logger.info(f"Saved {sum(len(bs) for bs in raw_blocks.values())} blocks to question_blocks.json")
 
+        save_cost_tracking(get_output_dir())
         status_text.text("Done!")
         st.success(f"Formatted {total} {'blocks' if has_v2_blocks else 'Q&A pairs'}")
+        render_cost_metrics("format_blocks")
         play_completion_sound()
         st.info("**Next:** Go to **Step 5: QC Questions** to review and approve extracted questions.")
         st.rerun()
@@ -2375,9 +2419,11 @@ def render_generate_step():
                 st.session_state.generated_questions["metadata"]["source_blocks_processed"] = completed
                 save_generated_questions()
 
+                save_cost_tracking(get_output_dir())
                 progress_bar.progress(1.0)
                 status_text.text(f"Complete: {completed} blocks processed, {total_cards_generated} cards generated")
                 st.success(f"Generated {total_cards_generated} cloze cards from {completed} blocks in Chapter {selected_ch_num}!")
+                render_cost_metrics("generate_cloze_block")
                 st.rerun()
         else:
             # Legacy question-based generation
@@ -2432,9 +2478,11 @@ def render_generate_step():
                 )
                 save_generated_questions()
 
+                save_cost_tracking(get_output_dir())
                 progress_bar.progress(1.0)
                 status_text.text(f"Complete: {completed} questions processed, {total_cards_generated} cards generated")
                 st.success(f"Generated {total_cards_generated} cloze cards from {completed} questions in Chapter {selected_ch_num}!")
+                render_cost_metrics("generate_cloze")
                 st.rerun()
 
     # All chapters generation logic
@@ -2513,9 +2561,11 @@ def render_generate_step():
                 st.session_state.generated_questions["metadata"]["source_blocks_processed"] = completed
                 save_generated_questions()
 
+                save_cost_tracking(get_output_dir())
                 progress_bar.progress(1.0)
                 status_text.text(f"Complete: {completed} blocks processed, {total_cards_generated} cards generated")
                 st.success(f"Generated {total_cards_generated} cloze cards from {completed} blocks!")
+                render_cost_metrics("generate_cloze_block")
                 st.rerun()
         else:
             # Legacy question-based generation
@@ -2568,9 +2618,11 @@ def render_generate_step():
                 st.session_state.generated_questions["metadata"]["source_questions_processed"] = completed
                 save_generated_questions()
 
+                save_cost_tracking(get_output_dir())
                 progress_bar.progress(1.0)
                 status_text.text(f"Complete: {completed} questions processed, {total_cards_generated} cards generated")
                 st.success(f"Generated {total_cards_generated} cloze cards from {completed} questions!")
+                render_cost_metrics("generate_cloze")
                 st.rerun()
 
     # Preview section
