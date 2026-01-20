@@ -308,3 +308,130 @@ Each textbook type config would include:
 - Expected section headers
 - Flanking text window size
 - ID format preferences
+
+---
+
+## Prompt Language: Rigid Instructions to Make Flexible
+
+The following prompt sections use overly rigid language that limits the LLM's ability to adapt to different textbook formats. The LLM should **understand content semantically** and make decisions based on that understanding, not follow hard formatting rules.
+
+### High Priority
+
+#### P1. Section Header Names (identify_question_blocks, format_raw_block)
+**Location:** `prompts.yaml:288-292, 420-423, 452-458`
+
+**Current (rigid):**
+```
+- "Imaging Findings:" sections
+- "Discussion:" sections
+- "Differential Diagnosis:" sections
+- "References:" sections
+```
+
+**Problem:** Lists specific section names; other textbooks may use "Clinical Pearls", "Key Points", "Teaching Points", "Evidence Base", etc.
+
+**Suggested fix:** Change to "educational sections such as discussions, findings, differentials, key points, or any other explanatory content - identify these based on the content's purpose, not specific header text"
+
+---
+
+#### P2. Answer Format Patterns (identify_question_blocks, format_raw_block)
+**Location:** `prompts.yaml:286, 310-311, 380-381`
+
+**Current (rigid):**
+```
+- Lines like "1a Answer B." or "Answer 1a. B." with brief explanations
+- answer_start: First line of answers for this block (e.g., "1a  Answer B." or "Answer 1a.")
+```
+
+**Problem:** Assumes specific answer line formats that may not apply to all textbooks.
+
+**Suggested fix:** Change to "identify where the answer/explanation section begins based on content - this typically follows the question choices and contains the correct answer with explanation"
+
+---
+
+#### P3. Cloze Categories (generate_cloze_cards)
+**Location:** `prompts.yaml:257, 591`
+
+**Current (rigid):**
+```
+Categories: anatomy, pathology, imaging, clinical, differential, statistics, mechanism
+```
+
+**Problem:** Medical-specific categories won't work for other textbook types (history, programming, etc.).
+
+**Suggested fix:** Either make categories configurable per textbook type, or change to "assign a category that describes the type of knowledge being tested (e.g., concept, fact, relationship, process, terminology)"
+
+---
+
+### Medium Priority
+
+#### P4. Chapter Structure Assumptions (identify_chapters)
+**Location:** `prompts.yaml:10-13`
+
+**Current (rigid):**
+```
+This is a medical textbook where each chapter has:
+- A chapter header (e.g., "Chapter 1: Title" or "1 Title")
+- A QUESTIONS section with numbered questions
+- An ANSWERS section with explanations
+```
+
+**Problem:** Assumes all textbooks follow this exact structure.
+
+**Suggested fix:** Change to "Analyze the textbook structure to identify chapters that contain question-and-answer content. Look for patterns in how this textbook organizes its Q&A sections."
+
+---
+
+#### P5. Sub-question ID Format Examples (identify_question_blocks, format_raw_block)
+**Location:** `prompts.yaml:272-275, 350-353`
+
+**Current (rigid):**
+```
+- Block "1" = all content for question 1 (context + 1a + 1b + 1c, etc.)
+- Look for numbers like "1", "2", "3" OR sub-question IDs like "1a", "1b", "2a", "2b"
+```
+
+**Problem:** Only shows letter suffixes; some textbooks use roman numerals (1i, 1ii), numbers (1.1, 1.2), or other schemes.
+
+**Suggested fix:** Change to "sub-questions may use various suffixes (letters like 1a/1b, roman numerals like 1i/1ii, decimals like 1.1/1.2, or other patterns) - identify the scheme used in this textbook"
+
+---
+
+#### P6. Opposite/Complement Pair Lists (generate_cloze_cards)
+**Location:** `prompts.yaml:96-97, 536`
+
+**Current (rigid):**
+```
+Apply to: younger/older, pediatric/adult, increased/decreased, higher/lower, proximal/distal,
+anterior/posterior, medial/lateral, superior/inferior, early/late, acute/chronic, larger/smaller, etc.
+```
+
+**Problem:** Exhaustive list implies these are the only pairs; misses domain-specific pairs.
+
+**Suggested fix:** Change to "Apply this principle to any complementary or opposite pairs where knowing one reveals the other - use your judgment to identify such relationships in the content"
+
+---
+
+#### P7. Question Pattern Detection (identify_chapters)
+**Location:** `prompts.yaml:21`
+
+**Current (rigid):**
+```
+Look for patterns like "QUESTIONS" or numbered questions (1., 2., etc.)
+```
+
+**Problem:** May miss other heading styles like "Practice Problems", "Review Questions", "Self-Assessment", "Exercises".
+
+**Suggested fix:** Change to "Look for sections containing practice questions, review problems, self-assessment items, or similar Q&A content - these may be labeled in various ways"
+
+---
+
+### Implementation Notes for Prompt Changes
+
+When updating prompts:
+
+1. **Preserve examples**: Keep concrete examples but frame them as "such as" or "for example" rather than exhaustive lists
+2. **Emphasize understanding**: Use phrases like "based on your understanding of the content" rather than "look for pattern X"
+3. **Avoid rigid patterns**: Replace "lines like X or Y" with "content that serves the purpose of..."
+4. **Trust the LLM**: The model can identify semantic patterns; don't constrain it with formatting rules
+5. **Test thoroughly**: Changes to prompts affect all future extractions; test against multiple textbook styles

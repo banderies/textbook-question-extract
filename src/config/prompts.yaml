@@ -294,9 +294,18 @@ identify_question_blocks:
     HOW TO FIND BOUNDARIES:
     - question_start: First line of this block's CONTENT. This varies by textbook format:
       * Format A: "1  A 55-year-old presents..." (number + context on same line)
-      * Format B: Question text on line N, then question number alone on line N+1 (e.g., "What is the diagnosis?\n1\nA. Option...")
-      * In Format B, question_start should be the question TEXT line, NOT the number line
-      * Look BEFORE the question number for introductory text that belongs to this question
+      * Format B: Question text on line N, then question number alone on line N+1
+
+      CRITICAL FOR FORMAT B - Example:
+      [LINE:004944] What is the diagnosis?    ← question_start should be 4944
+      [LINE:004945] 1                          ← This is just the question number
+      [LINE:004946] A.  Option A
+
+      When a line contains ONLY a question number (like "1" or "2a"), the actual question content
+      starts earlier. Read backwards to find where the question text or context begins - this may
+      be one line or several lines before the number. Use your understanding of the content to
+      identify the true start of each question block.
+
     - question_end: Last line of choices before the NEXT block's content begins
     - answer_start: First line of answers for this block (e.g., "1a  Answer B." or "Answer 1a.")
     - answer_end: Last line before the next block's answer section begins (include all discussion content)
