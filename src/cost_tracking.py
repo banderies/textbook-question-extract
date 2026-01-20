@@ -87,8 +87,20 @@ def calculate_cost(model_id: str, input_tokens: int, output_tokens: int) -> floa
 # Session State Management
 # =============================================================================
 
+def _has_session_state() -> bool:
+    """Check if we're in a Streamlit context with session state available."""
+    try:
+        # This will raise an error if not in Streamlit context
+        _ = st.session_state
+        return True
+    except Exception:
+        return False
+
+
 def init_cost_tracker():
     """Initialize cost tracker in session state if not present."""
+    if not _has_session_state():
+        return
     if "cost_tracker" not in st.session_state:
         st.session_state.cost_tracker = {
             "total_input_tokens": 0,
@@ -107,7 +119,12 @@ def track_api_call(step_name: str, model_id: str, usage: dict):
         step_name: Name of the step (e.g., "identify_chapters", "format_blocks")
         model_id: The model ID used
         usage: Usage dict from stream_message with input_tokens, output_tokens
+
+    Note: Silently skips tracking if called from a thread without Streamlit context.
     """
+    if not _has_session_state():
+        return  # Skip tracking when called from worker threads
+
     init_cost_tracker()
 
     input_tokens = usage.get("input_tokens", 0)
@@ -154,6 +171,9 @@ def get_session_summary() -> dict:
     Returns:
         Dict with total_input_tokens, total_output_tokens, total_cost, by_step
     """
+    if not _has_session_state():
+        return {"total_input_tokens": 0, "total_output_tokens": 0, "total_cost": 0.0, "by_step": {}}
+
     init_cost_tracker()
     tracker = st.session_state.cost_tracker
 
@@ -175,17 +195,19 @@ def get_step_cost(step_name: str) -> dict:
     Returns:
         Dict with input, output, cost, call_count for the step
     """
+    default = {"input": 0, "output": 0, "cost": 0.0, "call_count": 0}
+
+    if not _has_session_state():
+        return default
+
     init_cost_tracker()
-    return st.session_state.cost_tracker["by_step"].get(step_name, {
-        "input": 0,
-        "output": 0,
-        "cost": 0.0,
-        "call_count": 0
-    })
+    return st.session_state.cost_tracker["by_step"].get(step_name, default)
 
 
 def reset_cost_tracker():
     """Reset the cost tracker (e.g., when starting a new session)."""
+    if not _has_session_state():
+        return
     st.session_state.cost_tracker = {
         "total_input_tokens": 0,
         "total_output_tokens": 0,
