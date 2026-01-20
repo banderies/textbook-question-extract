@@ -3172,6 +3172,12 @@ def load_textbook_stats(textbook_path: Path) -> dict:
             "model_used": None,
             "last_updated": None,
             "blocks_processed": 0
+        },
+        "cost": {
+            "total_cost": 0.0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "by_step": {}
         }
     }
 
@@ -3243,6 +3249,20 @@ def load_textbook_stats(textbook_path: Path) -> dict:
         except (json.JSONDecodeError, IOError):
             pass
 
+    # Load cost tracking data
+    cost_file = textbook_path / "cost_tracking.json"
+    if cost_file.exists():
+        try:
+            with open(cost_file, 'r') as f:
+                cost_data = json.load(f)
+
+            stats["cost"]["total_cost"] = cost_data.get("total_cost", 0.0)
+            stats["cost"]["total_input_tokens"] = cost_data.get("total_input_tokens", 0)
+            stats["cost"]["total_output_tokens"] = cost_data.get("total_output_tokens", 0)
+            stats["cost"]["by_step"] = cost_data.get("by_step", {})
+        except (json.JSONDecodeError, IOError):
+            pass
+
     return stats
 
 
@@ -3273,7 +3293,7 @@ def generate_excel_report(all_stats: list[tuple[str, dict]]) -> bytes:
     ws_summary.title = "Summary"
 
     # Summary headers
-    summary_headers = ["Textbook", "Extracted", "Generated", "Ratio"]
+    summary_headers = ["Textbook", "Extracted", "Generated", "Ratio", "API Cost"]
     for col, header in enumerate(summary_headers, 1):
         cell = ws_summary.cell(row=1, column=col, value=header)
         cell.font = header_font
@@ -3284,24 +3304,28 @@ def generate_excel_report(all_stats: list[tuple[str, dict]]) -> bytes:
     # Summary data
     total_extracted = 0
     total_generated = 0
+    total_cost = 0.0
     for row, (name, stats) in enumerate(all_stats, 2):
         extracted = stats["extracted"]["total"]
         generated = stats["generated"]["total"]
+        cost = stats["cost"]["total_cost"]
         ratio = f"{(generated / extracted * 100):.0f}%" if extracted > 0 else "N/A"
 
         total_extracted += extracted
         total_generated += generated
+        total_cost += cost
 
         display_name = name.replace('_', ' ')
         ws_summary.cell(row=row, column=1, value=display_name).border = thin_border
         ws_summary.cell(row=row, column=2, value=extracted).border = thin_border
         ws_summary.cell(row=row, column=3, value=generated).border = thin_border
         ws_summary.cell(row=row, column=4, value=ratio).border = thin_border
+        ws_summary.cell(row=row, column=5, value=f"${cost:.2f}").border = thin_border
 
     # Total row
     total_row = len(all_stats) + 2
     total_ratio = f"{(total_generated / total_extracted * 100):.0f}%" if total_extracted > 0 else "N/A"
-    for col, value in enumerate(["TOTAL", total_extracted, total_generated, total_ratio], 1):
+    for col, value in enumerate(["TOTAL", total_extracted, total_generated, total_ratio, f"${total_cost:.2f}"], 1):
         cell = ws_summary.cell(row=total_row, column=col, value=value)
         cell.font = total_font
         cell.fill = total_fill
@@ -3309,7 +3333,7 @@ def generate_excel_report(all_stats: list[tuple[str, dict]]) -> bytes:
 
     # Adjust column widths for summary
     ws_summary.column_dimensions['A'].width = 40
-    for col in ['B', 'C', 'D']:
+    for col in ['B', 'C', 'D', 'E']:
         ws_summary.column_dimensions[col].width = 12
 
     # Per-textbook sheets
@@ -3411,9 +3435,46 @@ def generate_excel_report(all_stats: list[tuple[str, dict]]) -> bytes:
         if stats["generated"]["last_updated"]:
             ws.cell(row=meta_row, column=1, value="Last Updated:").font = Font(bold=True)
             ws.cell(row=meta_row, column=2, value=stats["generated"]["last_updated"])
+            meta_row += 1
+
+        # Cost Breakdown section
+        if stats["cost"]["total_cost"] > 0:
+            cost_start_row = meta_row + 2
+            ws.cell(row=cost_start_row, column=1, value="API Cost Breakdown").font = Font(bold=True, size=12)
+            ws.merge_cells(f'A{cost_start_row}:E{cost_start_row}')
+
+            cost_headers = ["Step", "Input Tokens", "Output Tokens", "Calls", "Cost"]
+            for col, header in enumerate(cost_headers, 1):
+                cell = ws.cell(row=cost_start_row + 1, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+                cell.border = thin_border
+
+            cost_row = cost_start_row + 2
+            cost_totals = {"input": 0, "output": 0, "calls": 0, "cost": 0.0}
+            for step_name, step_stats in stats["cost"]["by_step"].items():
+                ws.cell(row=cost_row, column=1, value=step_name.replace('_', ' ').title()).border = thin_border
+                ws.cell(row=cost_row, column=2, value=step_stats["input"]).border = thin_border
+                ws.cell(row=cost_row, column=3, value=step_stats["output"]).border = thin_border
+                ws.cell(row=cost_row, column=4, value=step_stats.get("call_count", 1)).border = thin_border
+                ws.cell(row=cost_row, column=5, value=f"${step_stats['cost']:.4f}").border = thin_border
+
+                cost_totals["input"] += step_stats["input"]
+                cost_totals["output"] += step_stats["output"]
+                cost_totals["calls"] += step_stats.get("call_count", 1)
+                cost_totals["cost"] += step_stats["cost"]
+                cost_row += 1
+
+            # Cost totals
+            for col, value in enumerate(["TOTAL", cost_totals["input"], cost_totals["output"], cost_totals["calls"], f"${cost_totals['cost']:.4f}"], 1):
+                cell = ws.cell(row=cost_row, column=col, value=value)
+                cell.font = total_font
+                cell.fill = total_fill
+                cell.border = thin_border
 
         # Adjust column widths
-        ws.column_dimensions['A'].width = 12
+        ws.column_dimensions['A'].width = 18
         for col in ['B', 'C', 'D', 'E']:
             ws.column_dimensions[col].width = 14
 
@@ -3446,9 +3507,10 @@ def render_stats_step():
     # Calculate totals
     total_extracted = sum(s["extracted"]["total"] for _, s in all_stats)
     total_generated = sum(s["generated"]["total"] for _, s in all_stats)
+    total_cost = sum(s["cost"]["total_cost"] for _, s in all_stats)
 
     # Excel export button at top
-    col1, col2, col3 = st.columns([1, 1, 2])
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
     with col1:
         excel_data = generate_excel_report(all_stats)
         st.download_button(
@@ -3462,6 +3524,8 @@ def render_stats_step():
         st.metric("Total Extracted", f"{total_extracted:,}")
     with col3:
         st.metric("Total Generated", f"{total_generated:,}")
+    with col4:
+        st.metric("Total API Cost", f"${total_cost:.2f}")
 
     st.markdown("---")
 
@@ -3478,12 +3542,14 @@ def render_stats_step():
         for name, stats in all_stats:
             extracted = stats["extracted"]["total"]
             generated = stats["generated"]["total"]
+            cost = stats["cost"]["total_cost"]
             ratio = f"{(generated / extracted * 100):.0f}%" if extracted > 0 else "N/A"
             summary_data.append({
                 "Textbook": name.replace('_', ' '),
                 "Extracted": extracted,
                 "Generated": generated,
-                "Ratio": ratio
+                "Ratio": ratio,
+                "API Cost": f"${cost:.2f}"
             })
 
         # Add total row
@@ -3492,7 +3558,8 @@ def render_stats_step():
             "Textbook": "TOTAL",
             "Extracted": total_extracted,
             "Generated": total_generated,
-            "Ratio": total_ratio
+            "Ratio": total_ratio,
+            "API Cost": f"${total_cost:.2f}"
         })
 
         st.dataframe(
@@ -3591,3 +3658,29 @@ def render_stats_step():
                                 st.caption(f"**Last Updated:** {stats['generated']['last_updated']}")
                 else:
                     st.info("No generated questions.")
+
+            # Cost breakdown section
+            if stats["cost"]["total_cost"] > 0:
+                st.markdown("---")
+                st.markdown("**API Cost Breakdown**")
+
+                cost_data = []
+                for step_name, step_stats in stats["cost"]["by_step"].items():
+                    cost_data.append({
+                        "Step": step_name.replace('_', ' ').title(),
+                        "Input Tokens": f"{step_stats['input']:,}",
+                        "Output Tokens": f"{step_stats['output']:,}",
+                        "Calls": step_stats.get("call_count", 1),
+                        "Cost": f"${step_stats['cost']:.4f}"
+                    })
+
+                # Add total row
+                cost_data.append({
+                    "Step": "TOTAL",
+                    "Input Tokens": f"{stats['cost']['total_input_tokens']:,}",
+                    "Output Tokens": f"{stats['cost']['total_output_tokens']:,}",
+                    "Calls": sum(s.get("call_count", 1) for s in stats["cost"]["by_step"].values()),
+                    "Cost": f"${stats['cost']['total_cost']:.4f}"
+                })
+
+                st.dataframe(cost_data, use_container_width=True, hide_index=True)
