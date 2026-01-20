@@ -443,6 +443,7 @@ format_raw_block:
     - For standalone questions, sub_questions has ONE entry with local_id = the question number
     - Copy all text VERBATIM (except for line markers) - do NOT summarize or paraphrase
     - Include the COMPLETE explanation text from the answer section, not a summary
+    - AVOID REDUNDANT REPETITION: If content appears identically in both question and answer sections, do not repeat it verbatim in the explanation. However, when including any content, always reproduce it VERBATIM - never summarize or paraphrase
 
 generate_cloze_cards_from_block:
   description: "Generate cloze cards from an entire question block with full context"

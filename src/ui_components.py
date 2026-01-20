@@ -952,12 +952,8 @@ def render_format_step():
             if context_text and local_id != block_id:
                 q_text = context_text + "\n\n" + q_text
 
-            # Build explanation
+            # Build explanation - use exactly what the LLM returns
             explanation = sq.get("explanation", "")
-            if shared_text and not explanation.strip():
-                explanation = shared_text
-            elif shared_text:
-                explanation = explanation + "\n\n" + shared_text
 
             # Combine question-specific images with context images
             # Context images apply to ALL sub-questions in the block
@@ -977,6 +973,7 @@ def render_format_step():
             answer_pages = sq.get("answer_pages", [])
 
             questions.append({
+                "id": full_id,
                 "full_id": full_id,
                 "local_id": local_id,
                 "chapter": ch_num,

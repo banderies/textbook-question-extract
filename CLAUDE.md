@@ -120,6 +120,32 @@ All state is persisted to JSON files in `output/<textbook_name>/`:
 | `questions_merged.json` | Legacy context association output |
 | `image_assignments_merged.json` | Legacy image assignments after context association |
 
+## Design Philosophy
+
+### LLM-First Content Processing
+Content extraction, organization, and formatting decisions should be handled by **LLM prompts** (in `config/prompts.yaml`), NOT by hardcoded Python logic. This principle exists because:
+
+1. **Flexibility**: LLMs can adapt to variations in input material that rigid code cannot handle
+2. **Maintainability**: Prompt changes don't require code deployment or testing
+3. **Intelligence**: LLMs can use context and judgment for edge cases
+
+**Rule**: When adding new content processing logic, ask: "Can the LLM handle this in the prompt?" If yes, modify the prompt. Only use Python code for:
+- Infrastructure (file I/O, API calls, UI rendering)
+- Data structure operations (building dicts, lists)
+- Validation that doesn't depend on content semantics
+
+### Known Hardcoded Logic (Future Refactoring Candidates)
+These areas currently use hardcoded logic that could be moved to prompts for better flexibility:
+
+| Area | Location | Current Behavior | Better Approach |
+|------|----------|------------------|-----------------|
+| Chapter ID format | ui_components.py:930 | Always `ch{N}` | LLM determines ID scheme |
+| Question ID format | ui_components.py:948 | Always `ch{N}_{id}` | LLM determines in Step 4 |
+| Shared discussion fields | ui_components.py:914-922 | Hardcoded "Imaging Findings", "Discussion" | Prompt specifies expected fields |
+| Context inheritance | ui/helpers.py:104-110 | First sub-question owns context | LLM determines in Step 4 |
+| Flanking text window | pdf_extraction.py:618 | Fixed 500 chars | Configurable per textbook |
+| Cloze categories | prompts.yaml:257 | Medical-specific categories | Per-textbook config |
+
 ## Key Design Patterns
 
 ### Editable Prompts (config/prompts.yaml)
@@ -175,13 +201,12 @@ Block 4:
 - `Image` field: question images (shown on front and back)
 - `AnswerImage` field: answer images (shown only on back, after explanation)
 
-**Post-Processing** (handled by `build_block_aware_image_assignments()` in `ui/helpers.py`):
-1. Build `image_assignments` dict (first question with each image wins)
-2. Set `context_from` on subsequent sub-questions for inheritance
-
-**Image Retrieval** (in `ui/helpers.py`):
+**Image Assignment Building** (in `ui/helpers.py`):
+- `build_block_aware_image_assignments()` creates the `image_assignments` dict from LLM output (first question with each image wins)
 - `get_images_for_question()` → returns question images from `image_files`
 - `get_answer_images_for_question()` → returns answer images from `answer_image_files`
+
+**Important**: The LLM determines all image distribution during Step 4. The Python code only reads what the LLM returns - it does not manipulate or redistribute images.
 
 ### Chapter-Aware Processing
 Question numbering restarts each chapter, so IDs are prefixed: `2a` becomes `ch1_2a` or `ch8_2a`.
