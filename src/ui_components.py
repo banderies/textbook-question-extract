@@ -38,7 +38,8 @@ from llm_extraction import (
 )
 from cost_tracking import (
     get_session_summary, get_step_cost, format_cost_display,
-    format_cost, format_tokens, save_cost_tracking
+    format_cost, format_tokens, save_cost_tracking,
+    set_last_step_cost, get_last_step_cost, clear_last_step_cost
 )
 
 # Import from modular ui package
@@ -65,10 +66,10 @@ from ui.sidebar import render_sidebar
 
 def render_cost_metrics(step_name: str = None, show_session: bool = False):
     """
-    Render cost metrics display.
+    Store cost metrics for display after rerun.
 
     Args:
-        step_name: If provided, show cost for specific step. Otherwise show session total.
+        step_name: If provided, store cost for specific step.
         show_session: If True, also show session totals alongside step cost.
     """
     if step_name:
@@ -76,15 +77,23 @@ def render_cost_metrics(step_name: str = None, show_session: bool = False):
         input_tokens = step_data["input"]
         output_tokens = step_data["output"]
         cost = step_data["cost"]
-        call_count = step_data["call_count"]
 
-        if call_count > 0:
-            st.caption(f"Step cost: {format_tokens(input_tokens)} in / {format_tokens(output_tokens)} out | {format_cost(cost)} ({call_count} calls)")
+        if cost > 0:
+            # Store for display after rerun
+            set_last_step_cost(step_name, input_tokens, output_tokens, cost)
 
-    if show_session:
-        summary = get_session_summary()
-        if summary["total_cost"] > 0:
-            st.caption(f"Session total: {format_cost(summary['total_cost'])}")
+
+def display_last_step_cost():
+    """Display the cost from the last completed step, if available."""
+    last_cost = get_last_step_cost()
+    if last_cost:
+        step = last_cost["step"]
+        input_tokens = last_cost["input_tokens"]
+        output_tokens = last_cost["output_tokens"]
+        cost = last_cost["cost"]
+        st.info(f"**Last step cost ({step}):** {format_tokens(input_tokens)} in / {format_tokens(output_tokens)} out | {format_cost(cost)}")
+        # Clear after displaying so it doesn't persist
+        clear_last_step_cost()
 
 
 # =============================================================================
@@ -286,6 +295,9 @@ def render_chapters_step():
             st.success("Chapters and subsequent data cleared")
             st.rerun()
 
+    # Show cost from last completed step
+    display_last_step_cost()
+
     has_pages = st.session_state.pages is not None
     has_chapters = st.session_state.chapters is not None
 
@@ -383,6 +395,9 @@ def render_questions_step():
             clear_step_data("questions")
             st.success("Questions and subsequent data cleared")
             st.rerun()
+
+    # Show cost from last completed step
+    display_last_step_cost()
 
     st.markdown("""
     This step identifies question and answer boundaries in the text and extracts raw Q&A pairs.
@@ -743,6 +758,9 @@ def render_format_step():
             clear_step_data("format")
             st.success("Format and subsequent data cleared")
             st.rerun()
+
+    # Show cost from last completed step
+    display_last_step_cost()
 
     st.markdown("""
     This step takes the raw Q&A blocks and formats them into structured data using parallel LLM calls.
@@ -2160,6 +2178,9 @@ def render_generate_step():
             clear_step_data("generate")
             st.success("Generated cards cleared")
             st.rerun()
+
+    # Show cost from last completed step
+    display_last_step_cost()
 
     # Check if block data is available (support both question_blocks and raw_blocks)
     question_blocks = st.session_state.get("question_blocks", {})

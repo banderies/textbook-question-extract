@@ -217,6 +217,35 @@ def reset_cost_tracker():
         "by_step": {},
         "calls": []
     }
+    if "last_step_cost" in st.session_state:
+        del st.session_state.last_step_cost
+
+
+def set_last_step_cost(step_name: str, input_tokens: int, output_tokens: int, cost: float):
+    """Store the last completed step's cost for display after rerun."""
+    if not _has_session_state():
+        return
+    st.session_state.last_step_cost = {
+        "step": step_name,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost": cost
+    }
+
+
+def get_last_step_cost() -> Optional[dict]:
+    """Get the last completed step's cost info, if available."""
+    if not _has_session_state():
+        return None
+    return st.session_state.get("last_step_cost")
+
+
+def clear_last_step_cost():
+    """Clear the last step cost display."""
+    if not _has_session_state():
+        return
+    if "last_step_cost" in st.session_state:
+        del st.session_state.last_step_cost
 
 
 # =============================================================================
