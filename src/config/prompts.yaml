@@ -292,8 +292,12 @@ identify_question_blocks:
        - Any other explanatory text before the next block's answers begin
 
     HOW TO FIND BOUNDARIES:
-    - question_start: First line of this block (usually the main number with context, e.g., "1  A 55-year-old...")
-    - question_end: Last line of choices before the NEXT block's number appears
+    - question_start: First line of this block's CONTENT. This varies by textbook format:
+      * Format A: "1  A 55-year-old presents..." (number + context on same line)
+      * Format B: Question text on line N, then question number alone on line N+1 (e.g., "What is the diagnosis?\n1\nA. Option...")
+      * In Format B, question_start should be the question TEXT line, NOT the number line
+      * Look BEFORE the question number for introductory text that belongs to this question
+    - question_end: Last line of choices before the NEXT block's content begins
     - answer_start: First line of answers for this block (e.g., "1a  Answer B." or "Answer 1a.")
     - answer_end: Last line before the next block's answer section begins (include all discussion content)
 
@@ -344,8 +348,16 @@ format_raw_block:
        - MULTI-PART: Block has sub-questions (e.g., "2a", "2b" under context "2")
 
     4. EXTRACT CONTEXT (for multi-part blocks):
-       - Text that introduces the scenario BEFORE the first sub-question
-       - Example: "A patient presents for arthrogram..." before "2a What is..."
+       - Context is ONLY shared introductory text that applies to ALL sub-questions
+       - Example WITH context: "A patient presents for arthrogram. [scenario details]..." followed by "2a What is the diagnosis?" and "2b What is the treatment?"
+         → context.text = "A patient presents for arthrogram. [scenario details]..."
+         → 2a.question_text = "What is the diagnosis?"
+         → 2b.question_text = "What is the treatment?"
+       - Example WITHOUT context: "What is the diagnosis? 2a [choices] What is the treatment? 2b [choices]"
+         → context.text = "" (empty - each sub-question has its own distinct question)
+         → 2a.question_text = "What is the diagnosis?"
+         → 2b.question_text = "What is the treatment?"
+       - IMPORTANT: Do NOT put the first sub-question's text in context.text. Only truly shared scenario text goes in context.
 
     5. FOR EACH QUESTION/SUB-QUESTION, extract:
        - local_id: The ACTUAL ID from the text (e.g., "1", "2a", "3", "15b")
