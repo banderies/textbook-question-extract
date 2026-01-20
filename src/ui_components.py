@@ -2455,6 +2455,7 @@ def render_generate_step():
                 status_text.text(f"Complete: {completed} blocks processed, {total_cards_generated} cards generated")
                 st.success(f"Generated {total_cards_generated} cloze cards from {completed} blocks in Chapter {selected_ch_num}!")
                 render_cost_metrics("generate_cloze_block")
+                save_cost_tracking(get_output_dir())
                 st.rerun()
         else:
             # Legacy question-based generation
@@ -2514,6 +2515,7 @@ def render_generate_step():
                 status_text.text(f"Complete: {completed} questions processed, {total_cards_generated} cards generated")
                 st.success(f"Generated {total_cards_generated} cloze cards from {completed} questions in Chapter {selected_ch_num}!")
                 render_cost_metrics("generate_cloze")
+                save_cost_tracking(get_output_dir())
                 st.rerun()
 
     # All chapters generation logic
@@ -2597,6 +2599,7 @@ def render_generate_step():
                 status_text.text(f"Complete: {completed} blocks processed, {total_cards_generated} cards generated")
                 st.success(f"Generated {total_cards_generated} cloze cards from {completed} blocks!")
                 render_cost_metrics("generate_cloze_block")
+                save_cost_tracking(get_output_dir())
                 st.rerun()
         else:
             # Legacy question-based generation
@@ -2654,6 +2657,7 @@ def render_generate_step():
                 status_text.text(f"Complete: {completed} questions processed, {total_cards_generated} cards generated")
                 st.success(f"Generated {total_cards_generated} cloze cards from {completed} questions!")
                 render_cost_metrics("generate_cloze")
+                save_cost_tracking(get_output_dir())
                 st.rerun()
 
     # Preview section
