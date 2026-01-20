@@ -88,11 +88,13 @@ def calculate_cost(model_id: str, input_tokens: int, output_tokens: int) -> floa
 # =============================================================================
 
 def _has_session_state() -> bool:
-    """Check if we're in a Streamlit context with session state available."""
+    """Check if we're in a Streamlit context with valid session state."""
     try:
-        # This will raise an error if not in Streamlit context
-        _ = st.session_state
-        return True
+        # Check if we can access session_state and it has the expected structure
+        # In worker threads, session_state exists but is empty/invalid
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        ctx = get_script_run_ctx()
+        return ctx is not None
     except Exception:
         return False
 
