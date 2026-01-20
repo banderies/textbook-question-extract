@@ -39,7 +39,8 @@ from llm_extraction import (
 from cost_tracking import (
     get_session_summary, get_step_cost, format_cost_display,
     format_cost, format_tokens, save_cost_tracking,
-    set_last_step_cost, get_last_step_cost, clear_last_step_cost
+    set_last_step_cost, get_last_step_cost, clear_last_step_cost,
+    flush_pending_costs
 )
 
 # Import from modular ui package
@@ -72,11 +73,20 @@ def render_cost_metrics(step_name: str = None, show_session: bool = False):
         step_name: If provided, store cost for specific step.
         show_session: If True, also show session totals alongside step cost.
     """
+    # First flush any pending costs from worker threads
+    pending = flush_pending_costs()
+
     if step_name:
         step_data = get_step_cost(step_name)
         input_tokens = step_data["input"]
         output_tokens = step_data["output"]
         cost = step_data["cost"]
+
+        # If no step data but we have pending costs, use those
+        if cost == 0 and pending["cost"] > 0:
+            input_tokens = pending["input_tokens"]
+            output_tokens = pending["output_tokens"]
+            cost = pending["cost"]
 
         if cost > 0:
             # Store for display after rerun

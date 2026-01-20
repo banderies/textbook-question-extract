@@ -7,10 +7,15 @@ Provides functions for recording calls, calculating costs, and formatting displa
 
 import os
 import json
+import threading
 from datetime import datetime
 from typing import Optional
 
 import streamlit as st
+
+# Thread-safe accumulator for costs from worker threads
+_thread_lock = threading.Lock()
+_pending_costs = []
 
 # =============================================================================
 # Model Pricing ($ per 1M tokens)
@@ -113,6 +118,79 @@ def init_cost_tracker():
         }
 
 
+def queue_api_cost(step_name: str, model_id: str, usage: dict):
+    """
+    Queue an API cost for later aggregation (thread-safe, for worker threads).
+
+    Args:
+        step_name: Name of the step
+        model_id: The model ID used
+        usage: Usage dict with input_tokens, output_tokens
+    """
+    global _pending_costs
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
+    cost = calculate_cost(model_id, input_tokens, output_tokens)
+
+    with _thread_lock:
+        _pending_costs.append({
+            "step": step_name,
+            "model": model_id,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": cost,
+            "timestamp": datetime.now().isoformat()
+        })
+
+
+def flush_pending_costs():
+    """
+    Flush pending costs from worker threads to session state.
+    Call this from the main thread after parallel operations complete.
+
+    Returns:
+        Dict with totals: {"input_tokens": N, "output_tokens": N, "cost": N}
+    """
+    global _pending_costs
+
+    with _thread_lock:
+        pending = _pending_costs.copy()
+        _pending_costs = []
+
+    if not pending:
+        return {"input_tokens": 0, "output_tokens": 0, "cost": 0.0}
+
+    # Aggregate totals
+    total_input = sum(p["input_tokens"] for p in pending)
+    total_output = sum(p["output_tokens"] for p in pending)
+    total_cost = sum(p["cost"] for p in pending)
+
+    # Add to session state if available
+    if _has_session_state():
+        init_cost_tracker()
+        tracker = st.session_state.cost_tracker
+
+        # Update totals
+        tracker["total_input_tokens"] += total_input
+        tracker["total_output_tokens"] += total_output
+        tracker["total_cost"] += total_cost
+
+        # Update by-step (use first step name from pending)
+        step_name = pending[0]["step"] if pending else "unknown"
+        if step_name not in tracker["by_step"]:
+            tracker["by_step"][step_name] = {"input": 0, "output": 0, "cost": 0.0, "call_count": 0}
+
+        tracker["by_step"][step_name]["input"] += total_input
+        tracker["by_step"][step_name]["output"] += total_output
+        tracker["by_step"][step_name]["cost"] += total_cost
+        tracker["by_step"][step_name]["call_count"] += len(pending)
+
+        # Add individual calls
+        tracker["calls"].extend(pending)
+
+    return {"input_tokens": total_input, "output_tokens": total_output, "cost": total_cost}
+
+
 def track_api_call(step_name: str, model_id: str, usage: dict):
     """
     Record an API call to the cost tracker.
@@ -122,10 +200,12 @@ def track_api_call(step_name: str, model_id: str, usage: dict):
         model_id: The model ID used
         usage: Usage dict from stream_message with input_tokens, output_tokens
 
-    Note: Silently skips tracking if called from a thread without Streamlit context.
+    Note: If not in Streamlit context (e.g., worker thread), queues for later aggregation.
     """
     if not _has_session_state():
-        return  # Skip tracking when called from worker threads
+        # Queue for later aggregation from main thread
+        queue_api_cost(step_name, model_id, usage)
+        return
 
     init_cost_tracker()
 

@@ -777,7 +777,8 @@ def format_raw_block_llm(
     answer_text: str,
     model_id: str,
     chapter_num: int,
-    max_retries: int = 5
+    max_retries: int = 5,
+    return_usage: bool = False
 ) -> dict:
     """
     Second pass: Format a raw question/answer block into structured JSON.
@@ -793,9 +794,10 @@ def format_raw_block_llm(
         model_id: Model to use
         chapter_num: Chapter number for logging
         max_retries: Maximum retry attempts for rate limit errors
+        return_usage: If True, return tuple of (result, usage_dict)
 
     Returns:
-        Dict with structured block data including context, sub_questions, shared_discussion
+        Dict with structured block data, or tuple of (dict, usage) if return_usage=True
     """
     import time
     import anthropic
