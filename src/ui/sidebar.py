@@ -29,6 +29,7 @@ def get_step_completion_status() -> dict[str, bool]:
         "generate": generate_complete,
         "export": False,  # Export is an action, not a state
         "prompts": False,  # Prompts step is always accessible, not completable
+        "stats": False,  # Stats step is always accessible, not completable
     }
 
 
@@ -71,7 +72,8 @@ def render_sidebar():
         ("qc", "5. QC Questions"),
         ("generate", "6. Generate Questions"),
         ("export", "7. Export"),
-        ("prompts", "8. Edit Prompts")
+        ("prompts", "8. Edit Prompts"),
+        ("stats", "9. Stats")
     ]
 
     for step_id, step_name in steps:

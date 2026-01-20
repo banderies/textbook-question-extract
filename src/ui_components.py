@@ -3041,3 +3041,470 @@ def render_prompts_step():
     - **JSON output**: Most prompts expect JSON output. Keep the output format instructions.
     - **Testing**: After editing, re-run the relevant extraction step to test your changes.
     """)
+
+
+# =============================================================================
+# Step 9: Stats
+# =============================================================================
+
+def scan_output_directories() -> list[dict]:
+    """Scan output directory for all textbook folders with data."""
+    output_base = Path("output")
+    if not output_base.exists():
+        return []
+
+    textbooks = []
+    for folder in sorted(output_base.iterdir()):
+        if folder.is_dir() and not folder.name.startswith('.'):
+            # Check if it has any relevant data files
+            questions_file = folder / "questions_by_chapter.json"
+            generated_file = folder / "generated_questions.json"
+
+            if questions_file.exists() or generated_file.exists():
+                textbooks.append({
+                    "name": folder.name,
+                    "path": folder,
+                    "display_name": folder.name.replace('_', ' ')
+                })
+
+    return textbooks
+
+
+def load_textbook_stats(textbook_path: Path) -> dict:
+    """Load and compute statistics for a single textbook."""
+    stats = {
+        "extracted": {
+            "total": 0,
+            "by_chapter": {},
+            "with_images": 0,
+            "with_answer_images": 0,
+            "multi_part": 0,
+            "context_only": 0
+        },
+        "generated": {
+            "total": 0,
+            "by_chapter": {},
+            "by_confidence": {"high": 0, "medium": 0, "low": 0},
+            "by_category": {},
+            "model_used": None,
+            "last_updated": None,
+            "blocks_processed": 0
+        }
+    }
+
+    # Load extracted questions
+    questions_file = textbook_path / "questions_by_chapter.json"
+    if questions_file.exists():
+        try:
+            with open(questions_file, 'r') as f:
+                questions_by_chapter = json.load(f)
+
+            for chapter, questions in questions_by_chapter.items():
+                chapter_count = len(questions)
+                stats["extracted"]["by_chapter"][chapter] = {
+                    "count": chapter_count,
+                    "with_images": 0,
+                    "with_answer_images": 0,
+                    "multi_part": 0,
+                    "context_only": 0
+                }
+                stats["extracted"]["total"] += chapter_count
+
+                for q in questions:
+                    if q.get("image_files"):
+                        stats["extracted"]["with_images"] += 1
+                        stats["extracted"]["by_chapter"][chapter]["with_images"] += 1
+                    if q.get("answer_image_files"):
+                        stats["extracted"]["with_answer_images"] += 1
+                        stats["extracted"]["by_chapter"][chapter]["with_answer_images"] += 1
+                    if q.get("context_from"):
+                        stats["extracted"]["multi_part"] += 1
+                        stats["extracted"]["by_chapter"][chapter]["multi_part"] += 1
+                    if q.get("is_context_only"):
+                        stats["extracted"]["context_only"] += 1
+                        stats["extracted"]["by_chapter"][chapter]["context_only"] += 1
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Load generated questions
+    generated_file = textbook_path / "generated_questions.json"
+    if generated_file.exists():
+        try:
+            with open(generated_file, 'r') as f:
+                generated_data = json.load(f)
+
+            metadata = generated_data.get("metadata", {})
+            stats["generated"]["model_used"] = metadata.get("model_used")
+            stats["generated"]["last_updated"] = metadata.get("last_updated") or metadata.get("created_at")
+            stats["generated"]["blocks_processed"] = metadata.get("source_blocks_processed", 0)
+
+            generated_cards = generated_data.get("generated_cards", {})
+            for chapter, cards in generated_cards.items():
+                chapter_count = len(cards)
+                stats["generated"]["by_chapter"][chapter] = {
+                    "count": chapter_count,
+                    "high": 0,
+                    "medium": 0,
+                    "low": 0
+                }
+                stats["generated"]["total"] += chapter_count
+
+                for card in cards:
+                    confidence = card.get("confidence", "").lower()
+                    if confidence in ["high", "medium", "low"]:
+                        stats["generated"]["by_confidence"][confidence] += 1
+                        stats["generated"]["by_chapter"][chapter][confidence] += 1
+
+                    category = card.get("category", "uncategorized")
+                    stats["generated"]["by_category"][category] = stats["generated"]["by_category"].get(category, 0) + 1
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    return stats
+
+
+def generate_excel_report(all_stats: list[tuple[str, dict]]) -> bytes:
+    """Generate Excel report with summary and per-textbook sheets."""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+
+    # Define styles
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_alignment = Alignment(horizontal="center", vertical="center")
+    total_font = Font(bold=True)
+    total_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+
+    # Summary sheet
+    ws_summary = wb.active
+    ws_summary.title = "Summary"
+
+    # Summary headers
+    summary_headers = ["Textbook", "Extracted", "Generated", "Ratio"]
+    for col, header in enumerate(summary_headers, 1):
+        cell = ws_summary.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+        cell.border = thin_border
+
+    # Summary data
+    total_extracted = 0
+    total_generated = 0
+    for row, (name, stats) in enumerate(all_stats, 2):
+        extracted = stats["extracted"]["total"]
+        generated = stats["generated"]["total"]
+        ratio = f"{(generated / extracted * 100):.0f}%" if extracted > 0 else "N/A"
+
+        total_extracted += extracted
+        total_generated += generated
+
+        display_name = name.replace('_', ' ')
+        ws_summary.cell(row=row, column=1, value=display_name).border = thin_border
+        ws_summary.cell(row=row, column=2, value=extracted).border = thin_border
+        ws_summary.cell(row=row, column=3, value=generated).border = thin_border
+        ws_summary.cell(row=row, column=4, value=ratio).border = thin_border
+
+    # Total row
+    total_row = len(all_stats) + 2
+    total_ratio = f"{(total_generated / total_extracted * 100):.0f}%" if total_extracted > 0 else "N/A"
+    for col, value in enumerate(["TOTAL", total_extracted, total_generated, total_ratio], 1):
+        cell = ws_summary.cell(row=total_row, column=col, value=value)
+        cell.font = total_font
+        cell.fill = total_fill
+        cell.border = thin_border
+
+    # Adjust column widths for summary
+    ws_summary.column_dimensions['A'].width = 40
+    for col in ['B', 'C', 'D']:
+        ws_summary.column_dimensions[col].width = 12
+
+    # Per-textbook sheets
+    for name, stats in all_stats:
+        # Sanitize sheet name (max 31 chars, no special chars)
+        sheet_name = name.replace('_', ' ')[:31]
+        ws = wb.create_sheet(title=sheet_name)
+
+        # Extracted Questions section
+        ws.cell(row=1, column=1, value="Extracted Questions").font = Font(bold=True, size=12)
+        ws.merge_cells('A1:E1')
+
+        extracted_headers = ["Chapter", "Count", "With Images", "Multi-part", "Context-only"]
+        for col, header in enumerate(extracted_headers, 1):
+            cell = ws.cell(row=2, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+
+        # Sort chapters naturally
+        extracted_chapters = sorted(
+            stats["extracted"]["by_chapter"].items(),
+            key=lambda x: (int(x[0].replace('ch', '')) if x[0].replace('ch', '').isdigit() else 999, x[0])
+        )
+
+        row = 3
+        ext_totals = {"count": 0, "with_images": 0, "multi_part": 0, "context_only": 0}
+        for chapter, ch_stats in extracted_chapters:
+            ws.cell(row=row, column=1, value=chapter).border = thin_border
+            ws.cell(row=row, column=2, value=ch_stats["count"]).border = thin_border
+
+            img_pct = f"{ch_stats['with_images']} ({ch_stats['with_images']/ch_stats['count']*100:.0f}%)" if ch_stats['count'] > 0 else "0"
+            ws.cell(row=row, column=3, value=img_pct).border = thin_border
+            ws.cell(row=row, column=4, value=ch_stats["multi_part"]).border = thin_border
+            ws.cell(row=row, column=5, value=ch_stats["context_only"]).border = thin_border
+
+            ext_totals["count"] += ch_stats["count"]
+            ext_totals["with_images"] += ch_stats["with_images"]
+            ext_totals["multi_part"] += ch_stats["multi_part"]
+            ext_totals["context_only"] += ch_stats["context_only"]
+            row += 1
+
+        # Extracted totals
+        total_img_pct = f"{ext_totals['with_images']} ({ext_totals['with_images']/ext_totals['count']*100:.0f}%)" if ext_totals['count'] > 0 else "0"
+        for col, value in enumerate(["TOTAL", ext_totals["count"], total_img_pct, ext_totals["multi_part"], ext_totals["context_only"]], 1):
+            cell = ws.cell(row=row, column=col, value=value)
+            cell.font = total_font
+            cell.fill = total_fill
+            cell.border = thin_border
+
+        # Generated Questions section (start a few rows down)
+        gen_start_row = row + 3
+        ws.cell(row=gen_start_row, column=1, value="Generated Questions").font = Font(bold=True, size=12)
+        ws.merge_cells(f'A{gen_start_row}:E{gen_start_row}')
+
+        gen_headers = ["Chapter", "Count", "High", "Medium", "Low"]
+        for col, header in enumerate(gen_headers, 1):
+            cell = ws.cell(row=gen_start_row + 1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+
+        # Sort generated chapters naturally
+        generated_chapters = sorted(
+            stats["generated"]["by_chapter"].items(),
+            key=lambda x: (int(x[0].replace('ch', '')) if x[0].replace('ch', '').isdigit() else 999, x[0])
+        )
+
+        row = gen_start_row + 2
+        gen_totals = {"count": 0, "high": 0, "medium": 0, "low": 0}
+        for chapter, ch_stats in generated_chapters:
+            ws.cell(row=row, column=1, value=chapter).border = thin_border
+            ws.cell(row=row, column=2, value=ch_stats["count"]).border = thin_border
+            ws.cell(row=row, column=3, value=ch_stats["high"]).border = thin_border
+            ws.cell(row=row, column=4, value=ch_stats["medium"]).border = thin_border
+            ws.cell(row=row, column=5, value=ch_stats["low"]).border = thin_border
+
+            gen_totals["count"] += ch_stats["count"]
+            gen_totals["high"] += ch_stats["high"]
+            gen_totals["medium"] += ch_stats["medium"]
+            gen_totals["low"] += ch_stats["low"]
+            row += 1
+
+        # Generated totals
+        for col, value in enumerate(["TOTAL", gen_totals["count"], gen_totals["high"], gen_totals["medium"], gen_totals["low"]], 1):
+            cell = ws.cell(row=row, column=col, value=value)
+            cell.font = total_font
+            cell.fill = total_fill
+            cell.border = thin_border
+
+        # Metadata section
+        meta_row = row + 3
+        if stats["generated"]["model_used"]:
+            ws.cell(row=meta_row, column=1, value="Model:").font = Font(bold=True)
+            ws.cell(row=meta_row, column=2, value=stats["generated"]["model_used"])
+            meta_row += 1
+        if stats["generated"]["last_updated"]:
+            ws.cell(row=meta_row, column=1, value="Last Updated:").font = Font(bold=True)
+            ws.cell(row=meta_row, column=2, value=stats["generated"]["last_updated"])
+
+        # Adjust column widths
+        ws.column_dimensions['A'].width = 12
+        for col in ['B', 'C', 'D', 'E']:
+            ws.column_dimensions[col].width = 14
+
+    # Save to bytes
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def render_stats_step():
+    """Render statistics overview for all textbooks."""
+    st.header("Step 9: Stats")
+    st.caption("View extraction and generation statistics across all processed textbooks.")
+
+    # Scan for textbooks
+    textbooks = scan_output_directories()
+
+    if not textbooks:
+        st.warning("No textbooks with data found in the output directory.")
+        st.info("Process at least one textbook through Steps 1-4 to see statistics here.")
+        return
+
+    # Load stats for all textbooks
+    all_stats = []
+    for tb in textbooks:
+        stats = load_textbook_stats(tb["path"])
+        all_stats.append((tb["name"], stats))
+
+    # Calculate totals
+    total_extracted = sum(s["extracted"]["total"] for _, s in all_stats)
+    total_generated = sum(s["generated"]["total"] for _, s in all_stats)
+
+    # Excel export button at top
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        excel_data = generate_excel_report(all_stats)
+        st.download_button(
+            label="Download Excel Report",
+            data=excel_data,
+            file_name=f"textbook_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
+    with col2:
+        st.metric("Total Extracted", f"{total_extracted:,}")
+    with col3:
+        st.metric("Total Generated", f"{total_generated:,}")
+
+    st.markdown("---")
+
+    # Create tabs: Summary + one per textbook
+    tab_names = ["Summary"] + [tb["display_name"] for tb in textbooks]
+    tabs = st.tabs(tab_names)
+
+    # Summary tab
+    with tabs[0]:
+        st.subheader("All Textbooks Summary")
+
+        # Build summary dataframe
+        summary_data = []
+        for name, stats in all_stats:
+            extracted = stats["extracted"]["total"]
+            generated = stats["generated"]["total"]
+            ratio = f"{(generated / extracted * 100):.0f}%" if extracted > 0 else "N/A"
+            summary_data.append({
+                "Textbook": name.replace('_', ' '),
+                "Extracted": extracted,
+                "Generated": generated,
+                "Ratio": ratio
+            })
+
+        # Add total row
+        total_ratio = f"{(total_generated / total_extracted * 100):.0f}%" if total_extracted > 0 else "N/A"
+        summary_data.append({
+            "Textbook": "TOTAL",
+            "Extracted": total_extracted,
+            "Generated": total_generated,
+            "Ratio": total_ratio
+        })
+
+        st.dataframe(
+            summary_data,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    # Per-textbook tabs
+    for i, (tb, (name, stats)) in enumerate(zip(textbooks, all_stats)):
+        with tabs[i + 1]:
+            st.subheader(f"{tb['display_name']} Details")
+
+            # Two columns: Extracted and Generated
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("**Extracted Questions**")
+
+                if stats["extracted"]["total"] > 0:
+                    # Build extracted data
+                    extracted_data = []
+                    sorted_chapters = sorted(
+                        stats["extracted"]["by_chapter"].items(),
+                        key=lambda x: (int(x[0].replace('ch', '')) if x[0].replace('ch', '').isdigit() else 999, x[0])
+                    )
+
+                    for chapter, ch_stats in sorted_chapters:
+                        count = ch_stats["count"]
+                        img_pct = f"{ch_stats['with_images']} ({ch_stats['with_images']/count*100:.0f}%)" if count > 0 else "0"
+                        extracted_data.append({
+                            "Chapter": chapter,
+                            "Count": count,
+                            "With Images": img_pct,
+                            "Multi-part": ch_stats["multi_part"],
+                            "Context-only": ch_stats["context_only"]
+                        })
+
+                    # Add totals
+                    total_count = stats["extracted"]["total"]
+                    total_with_img = stats["extracted"]["with_images"]
+                    total_img_pct = f"{total_with_img} ({total_with_img/total_count*100:.0f}%)" if total_count > 0 else "0"
+                    extracted_data.append({
+                        "Chapter": "TOTAL",
+                        "Count": total_count,
+                        "With Images": total_img_pct,
+                        "Multi-part": stats["extracted"]["multi_part"],
+                        "Context-only": stats["extracted"]["context_only"]
+                    })
+
+                    st.dataframe(extracted_data, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No extracted questions.")
+
+            with col2:
+                st.markdown("**Generated Questions**")
+
+                if stats["generated"]["total"] > 0:
+                    # Build generated data
+                    generated_data = []
+                    sorted_chapters = sorted(
+                        stats["generated"]["by_chapter"].items(),
+                        key=lambda x: (int(x[0].replace('ch', '')) if x[0].replace('ch', '').isdigit() else 999, x[0])
+                    )
+
+                    for chapter, ch_stats in sorted_chapters:
+                        generated_data.append({
+                            "Chapter": chapter,
+                            "Count": ch_stats["count"],
+                            "High": ch_stats["high"],
+                            "Medium": ch_stats["medium"],
+                            "Low": ch_stats["low"]
+                        })
+
+                    # Add totals
+                    conf = stats["generated"]["by_confidence"]
+                    generated_data.append({
+                        "Chapter": "TOTAL",
+                        "Count": stats["generated"]["total"],
+                        "High": conf["high"],
+                        "Medium": conf["medium"],
+                        "Low": conf["low"]
+                    })
+
+                    st.dataframe(generated_data, use_container_width=True, hide_index=True)
+
+                    # Metadata
+                    if stats["generated"]["model_used"] or stats["generated"]["last_updated"]:
+                        st.markdown("---")
+                        meta_cols = st.columns(2)
+                        if stats["generated"]["model_used"]:
+                            with meta_cols[0]:
+                                st.caption(f"**Model:** {stats['generated']['model_used']}")
+                        if stats["generated"]["last_updated"]:
+                            with meta_cols[1]:
+                                st.caption(f"**Last Updated:** {stats['generated']['last_updated']}")
+                else:
+                    st.info("No generated questions.")
