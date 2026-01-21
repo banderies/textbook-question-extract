@@ -134,7 +134,8 @@ def stream_message(
 
     Returns:
         Tuple of (response_text, usage_dict)
-        usage_dict contains: input_tokens, output_tokens, stop_reason
+        usage_dict contains: input_tokens, output_tokens, cache_creation_input_tokens,
+                            cache_read_input_tokens, stop_reason
     """
     if max_tokens is None:
         max_tokens = get_model_max_tokens(model_id)
@@ -142,6 +143,8 @@ def stream_message(
     response_text = ""
     input_tokens = 0
     output_tokens = 0
+    cache_creation_input_tokens = 0
+    cache_read_input_tokens = 0
     stop_reason = None
     token_count = 0
 
@@ -155,7 +158,11 @@ def stream_message(
             if hasattr(event, 'type'):
                 if event.type == 'message_start':
                     if hasattr(event, 'message') and hasattr(event.message, 'usage'):
-                        input_tokens = event.message.usage.input_tokens
+                        usage_obj = event.message.usage
+                        input_tokens = usage_obj.input_tokens
+                        # Capture cache-related tokens if present
+                        cache_creation_input_tokens = getattr(usage_obj, 'cache_creation_input_tokens', 0) or 0
+                        cache_read_input_tokens = getattr(usage_obj, 'cache_read_input_tokens', 0) or 0
                 elif event.type == 'content_block_delta':
                     if hasattr(event, 'delta') and hasattr(event.delta, 'text'):
                         chunk = event.delta.text
@@ -179,6 +186,8 @@ def stream_message(
     usage = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
         "stop_reason": stop_reason
     }
 

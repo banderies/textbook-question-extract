@@ -18,9 +18,8 @@ from state_management import (
     SOURCE_DIR, get_pdf_slug, get_output_dir, get_images_dir, get_source_dir,
     get_available_textbooks, clear_session_data, load_saved_data,
     load_settings, load_qc_progress, save_settings, save_chapters,
-    save_questions, save_raw_questions, save_images, save_pages, save_image_assignments,
-    save_questions_merged, save_image_assignments_merged, save_qc_progress,
-    get_raw_questions_file, get_raw_blocks_file, save_raw_blocks, save_question_blocks,
+    save_questions, save_images, save_pages, save_image_assignments,
+    save_qc_progress, get_raw_blocks_file, save_raw_blocks, save_question_blocks,
     save_global_settings
 )
 from pdf_extraction import (
@@ -428,14 +427,6 @@ def render_questions_step():
 
     # Initialize logger
     output_dir = get_output_dir()
-
-    # Ensure raw_questions is loaded from file if session state is empty
-    # This prevents data loss on session reset
-    raw_questions_file = get_raw_questions_file()
-    if not st.session_state.raw_questions and os.path.exists(raw_questions_file):
-        with open(raw_questions_file, "r") as f:
-            st.session_state.raw_questions = json.load(f)
-
     logger = get_extraction_logger(output_dir)
 
     # Chapter selector
@@ -777,30 +768,15 @@ def render_format_step():
     Each block is processed individually, extracting context, sub-questions, choices, correct answers, and explanations.
     """)
 
-    # Load raw_blocks (new v2 format)
+    # Load raw_blocks if not in session state
     raw_blocks_file = get_raw_blocks_file()
     if not st.session_state.raw_blocks and os.path.exists(raw_blocks_file):
         with open(raw_blocks_file, "r") as f:
             st.session_state.raw_blocks = json.load(f)
 
-    # Also load raw_questions (legacy format) if available
-    raw_questions_file = get_raw_questions_file()
-    if not st.session_state.raw_questions and os.path.exists(raw_questions_file):
-        with open(raw_questions_file, "r") as f:
-            st.session_state.raw_questions = json.load(f)
-
     raw_blocks = st.session_state.get("raw_blocks", {})
-    raw_questions = st.session_state.get("raw_questions", {})
 
-    # Check if we have the new v2 format (blocks with question_text_raw)
-    has_v2_blocks = False
-    if raw_blocks:
-        # Check first block to see if it has v2 format
-        first_ch = next(iter(raw_blocks.values()), [])
-        if first_ch and isinstance(first_ch, list) and len(first_ch) > 0:
-            has_v2_blocks = "question_text_raw" in first_ch[0]
-
-    if not raw_blocks and not raw_questions:
+    if not raw_blocks:
         st.warning("Please extract raw questions first (Step 3)")
         return
 
@@ -813,17 +789,11 @@ def render_format_step():
     output_dir = get_output_dir()
     logger = get_extraction_logger(output_dir)
 
-    total_blocks = sum(len(bs) for bs in raw_blocks.values()) if raw_blocks else 0
-    total_raw = sum(len(qs) for qs in raw_questions.values()) if raw_questions else 0
+    total_blocks = sum(len(bs) for bs in raw_blocks.values())
     total_formatted = sum(len(qs) for qs in st.session_state.questions.values())
 
-    if has_v2_blocks:
-        st.success(f"**New block format detected (v2):** {total_blocks} raw blocks with line numbers preserved")
-        st.info(f"Formatted questions: {total_formatted}")
-    elif total_blocks > 0:
-        st.info(f"Raw Q&A pairs: {total_raw} (from {total_blocks} blocks) | Formatted: {total_formatted}")
-    else:
-        st.info(f"Raw Q&A pairs: {total_raw} | Formatted: {total_formatted}")
+    st.success(f"**{total_blocks} raw blocks** with line numbers preserved")
+    st.info(f"Formatted questions: {total_formatted}")
 
     # Chapter selector
     if not st.session_state.chapters:
@@ -841,11 +811,9 @@ def render_format_step():
     selected_ch_num = selected_ch["chapter_number"]
     selected_ch_key = f"ch{selected_ch_num}"
 
-    # Count blocks/questions for selected chapter
+    # Count blocks for selected chapter
     ch_raw_blocks = raw_blocks.get(selected_ch_key, [])
-    ch_raw_questions = raw_questions.get(selected_ch_key, [])
     ch_block_count = len(ch_raw_blocks)
-    ch_raw_count = len(ch_raw_questions) if ch_raw_questions else ch_block_count
 
     # Model selection and parallel workers
     model_col, workers_col, btn_col1, btn_col2 = st.columns([2, 1.5, 2, 2])
@@ -897,7 +865,7 @@ def render_format_step():
             ch_num
         )
 
-        # Convert formatted block to raw_questions format
+        # Convert formatted block to questions format
         questions = []
 
         context = formatted_block.get("context", {})
@@ -1001,78 +969,57 @@ def render_format_step():
         return ch_key, questions, formatted_block
 
     with btn_col1:
-        if has_v2_blocks:
-            format_chapter = st.button(
-                f"Format Chapter {selected_ch_num} ({ch_block_count} blocks)",
-                type="primary",
-                key="format_chapter_btn",
-                disabled=ch_block_count == 0
-            )
-        else:
-            format_chapter = st.button(
-                f"Format Chapter {selected_ch_num} ({ch_raw_count})",
-                type="primary",
-                key="format_chapter_btn",
-                disabled=ch_raw_count == 0
-            )
+        format_chapter = st.button(
+            f"Format Chapter {selected_ch_num} ({ch_block_count} blocks)",
+            type="primary",
+            key="format_chapter_btn",
+            disabled=ch_block_count == 0
+        )
 
     with btn_col2:
         format_all = st.button("Format ALL", type="secondary", key="format_all_btn")
 
     # Single chapter formatting logic
     if format_chapter:
-        if has_v2_blocks and ch_block_count == 0:
+        if ch_block_count == 0:
             st.warning(f"No raw blocks in Chapter {selected_ch_num}")
-        elif not has_v2_blocks and ch_raw_count == 0:
-            st.warning(f"No raw questions in Chapter {selected_ch_num}")
         else:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            if has_v2_blocks:
-                # V2 Block-based formatting
-                ch_blocks = [(selected_ch_key, block) for block in ch_raw_blocks]
-                total = len(ch_blocks)
-                status_text.text(f"Formatting {total} blocks from Chapter {selected_ch_num}...")
+            # Block-based formatting
+            ch_blocks = [(selected_ch_key, block) for block in ch_raw_blocks]
+            total = len(ch_blocks)
+            status_text.text(f"Formatting {total} blocks from Chapter {selected_ch_num}...")
 
-                formatted_list = []
-                raw_questions_list = []
-                completed = 0
+            formatted_list = []
+            completed = 0
 
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {executor.submit(format_single_block, item): item for item in ch_blocks}
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(format_single_block, item): item for item in ch_blocks}
 
-                    for future in as_completed(futures):
-                        try:
-                            ch_key, questions, _ = future.result()
-                            formatted_list.extend(questions)
-                            raw_questions_list.extend(questions)
-                        except Exception as e:
-                            ch_key, block = futures[future]
-                            logger.error(f"Error formatting block {block.get('block_id', '?')}: {e}")
-                            # Add placeholder
-                            formatted_list.append({
-                                "full_id": block.get("block_id", "?"),
-                                "local_id": block.get("block_label", "?"),
-                                "text": block.get("question_text_raw", ""),
-                                "choices": {},
-                                "correct_answer": "",
-                                "explanation": block.get("answer_text_raw", ""),
-                                "image_files": [],
-                                "error": str(e)
-                            })
+                for future in as_completed(futures):
+                    try:
+                        ch_key, questions, _ = future.result()
+                        formatted_list.extend(questions)
+                    except Exception as e:
+                        ch_key, block = futures[future]
+                        logger.error(f"Error formatting block {block.get('block_id', '?')}: {e}")
+                        # Add placeholder
+                        formatted_list.append({
+                            "full_id": block.get("block_id", "?"),
+                            "local_id": block.get("block_label", "?"),
+                            "text": block.get("question_text_raw", ""),
+                            "choices": {},
+                            "correct_answer": "",
+                            "explanation": block.get("answer_text_raw", ""),
+                            "image_files": [],
+                            "error": str(e)
+                        })
 
-                        completed += 1
-                        progress_bar.progress(completed / total)
-                        status_text.text(f"Chapter {selected_ch_num}: {completed}/{total} blocks formatted...")
-
-                # Also update raw_questions for compatibility
-                st.session_state.raw_questions[selected_ch_key] = raw_questions_list
-                save_raw_questions()
-
-            else:
-                st.warning("No v2 blocks available. Please extract questions first (Step 3).")
-                st.rerun()
+                    completed += 1
+                    progress_bar.progress(completed / total)
+                    status_text.text(f"Chapter {selected_ch_num}: {completed}/{total} blocks formatted...")
 
             # Sort and save
             formatted_list.sort(key=lambda q: question_sort_key(q["full_id"]))
@@ -1089,7 +1036,7 @@ def render_format_step():
 
             save_cost_tracking(get_output_dir())
             status_text.text("Done!")
-            st.success(f"Formatted {total} {'blocks' if has_v2_blocks else 'Q&A pairs'} from Chapter {selected_ch_num}")
+            st.success(f"Formatted {total} blocks from Chapter {selected_ch_num}")
             render_cost_metrics("format_blocks")
             play_completion_sound()
             st.rerun()
@@ -1099,63 +1046,51 @@ def render_format_step():
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        if has_v2_blocks:
-            # V2 Block-based formatting for all chapters
-            all_blocks = []
-            for ch_key, ch_blocks in raw_blocks.items():
-                for block in ch_blocks:
-                    all_blocks.append((ch_key, block))
+        # Block-based formatting for all chapters
+        all_blocks = []
+        for ch_key, ch_blocks in raw_blocks.items():
+            for block in ch_blocks:
+                all_blocks.append((ch_key, block))
 
-            total = len(all_blocks)
-            status_text.text(f"Formatting {total} blocks with {max_workers} parallel workers...")
+        total = len(all_blocks)
+        status_text.text(f"Formatting {total} blocks with {max_workers} parallel workers...")
 
-            formatted_by_chapter = {}
-            raw_questions_by_chapter = {}
-            completed = 0
+        formatted_by_chapter = {}
+        completed = 0
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(format_single_block, item): item for item in all_blocks}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(format_single_block, item): item for item in all_blocks}
 
-                for future in as_completed(futures):
-                    try:
-                        ch_key, questions, _ = future.result()
-                        if ch_key not in formatted_by_chapter:
-                            formatted_by_chapter[ch_key] = []
-                            raw_questions_by_chapter[ch_key] = []
-                        formatted_by_chapter[ch_key].extend(questions)
-                        raw_questions_by_chapter[ch_key].extend(questions)
-                    except Exception as e:
-                        ch_key, block = futures[future]
-                        logger.error(f"Error formatting block {block.get('block_id', '?')}: {e}")
-                        if ch_key not in formatted_by_chapter:
-                            formatted_by_chapter[ch_key] = []
-                        formatted_by_chapter[ch_key].append({
-                            "full_id": block.get("block_id", "?"),
-                            "local_id": block.get("block_label", "?"),
-                            "text": block.get("question_text_raw", ""),
-                            "choices": {},
-                            "correct_answer": "",
-                            "explanation": block.get("answer_text_raw", ""),
-                            "image_files": [],
-                            "error": str(e)
-                        })
+            for future in as_completed(futures):
+                try:
+                    ch_key, questions, _ = future.result()
+                    if ch_key not in formatted_by_chapter:
+                        formatted_by_chapter[ch_key] = []
+                    formatted_by_chapter[ch_key].extend(questions)
+                except Exception as e:
+                    ch_key, block = futures[future]
+                    logger.error(f"Error formatting block {block.get('block_id', '?')}: {e}")
+                    if ch_key not in formatted_by_chapter:
+                        formatted_by_chapter[ch_key] = []
+                    formatted_by_chapter[ch_key].append({
+                        "full_id": block.get("block_id", "?"),
+                        "local_id": block.get("block_label", "?"),
+                        "text": block.get("question_text_raw", ""),
+                        "choices": {},
+                        "correct_answer": "",
+                        "explanation": block.get("answer_text_raw", ""),
+                        "image_files": [],
+                        "error": str(e)
+                    })
 
-                    completed += 1
-                    progress_bar.progress(completed / total)
-                    status_text.text(f"Formatted {completed}/{total} blocks...")
+                completed += 1
+                progress_bar.progress(completed / total)
+                status_text.text(f"Formatted {completed}/{total} blocks...")
 
-                    # Save incrementally every 5 blocks
-                    if completed % 5 == 0:
-                        st.session_state.questions = formatted_by_chapter
-                        save_questions()
-
-            # Also update raw_questions for compatibility
-            st.session_state.raw_questions = raw_questions_by_chapter
-            save_raw_questions()
-
-        else:
-            st.warning("No v2 blocks available. Please extract questions first (Step 3).")
-            st.rerun()
+                # Save incrementally every 5 blocks
+                if completed % 5 == 0:
+                    st.session_state.questions = formatted_by_chapter
+                    save_questions()
 
         # Sort questions within each chapter
         for ch_key in formatted_by_chapter:
@@ -1178,7 +1113,7 @@ def render_format_step():
 
         save_cost_tracking(get_output_dir())
         status_text.text("Done!")
-        st.success(f"Formatted {total} {'blocks' if has_v2_blocks else 'Q&A pairs'}")
+        st.success(f"Formatted {total} blocks")
         render_cost_metrics("format_blocks")
         play_completion_sound()
         st.info("**Next:** Go to **Step 5: QC Questions** to review and approve extracted questions.")
@@ -1256,8 +1191,8 @@ def render_qc_step():
             st.success("QC and export data cleared")
             st.rerun()
 
-    # Use merged questions if available (legacy), otherwise use formatted questions from Step 4
-    questions_source = st.session_state.questions_merged if st.session_state.questions_merged else st.session_state.questions
+    # Use formatted questions from Step 4
+    questions_source = st.session_state.questions
 
     if not questions_source:
         st.warning("Please format questions first (Step 4)")
@@ -1399,21 +1334,12 @@ def render_qc_step():
             with col5:
                 if st.button("Detect Pages", help="Detect PDF pages for each question"):
                     with st.spinner("Detecting page numbers..."):
-                        # Detect pages for original questions
                         add_page_numbers_to_questions(
                             st.session_state.questions,
                             st.session_state.pages,
                             st.session_state.chapters
                         )
                         save_questions()
-                        # Also detect pages for merged questions if they exist
-                        if st.session_state.questions_merged:
-                            add_page_numbers_to_questions(
-                                st.session_state.questions_merged,
-                                st.session_state.pages,
-                                st.session_state.chapters
-                            )
-                            save_questions_merged()
                         st.rerun()
 
             with col6:
@@ -1509,18 +1435,12 @@ def render_qc_step():
                 def remove_image(img_filename):
                     st.session_state.image_assignments.pop(img_filename, None)
                     save_image_assignments()
-                    if st.session_state.image_assignments_merged:
-                        st.session_state.image_assignments_merged.pop(img_filename, None)
-                        save_image_assignments_merged()
                     if "qc_question_selector" in st.session_state:
                         del st.session_state.qc_question_selector
 
                 def assign_image(img_filename, question_id):
                     st.session_state.image_assignments[img_filename] = question_id
                     save_image_assignments()
-                    if st.session_state.image_assignments_merged:
-                        st.session_state.image_assignments_merged[img_filename] = question_id
-                        save_image_assignments_merged()
                     if "qc_question_selector" in st.session_state:
                         del st.session_state.qc_question_selector
 
@@ -1615,14 +1535,6 @@ def render_qc_step():
                                     st.session_state.chapters
                                 )
                                 save_questions()
-                                # Also detect for merged questions
-                                if st.session_state.questions_merged:
-                                    add_page_numbers_to_questions(
-                                        st.session_state.questions_merged,
-                                        st.session_state.pages,
-                                        st.session_state.chapters
-                                    )
-                                    save_questions_merged()
                                 st.rerun()
                     else:
                         # Show question pages and answer pages side by side
@@ -1890,10 +1802,30 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                 border-radius: 6px;
             }
             .cloze-source {
-                margin-top: 15px;
-                font-size: 12px;
-                color: #95a5a6;
+                margin-top: 20px;
+                padding: 14px;
+                background: #f8f9fa;
+                border: 1px solid #e1e5e9;
+                border-radius: 6px;
+                font-size: 13px;
+                color: #6c757d;
                 text-align: left;
+                white-space: pre-wrap;
+                line-height: 1.5;
+            }
+            .cloze-source-label {
+                font-weight: 600;
+                color: #495057;
+                display: block;
+                margin-bottom: 10px;
+                border-bottom: 1px solid #e1e5e9;
+                padding-bottom: 8px;
+            }
+            .cloze-source-text {
+                font-size: 12px;
+                color: #6c757d;
+                max-height: 300px;
+                overflow-y: auto;
             }
         '''
     )
@@ -2050,11 +1982,15 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                 for q in ch_qs:
                     question_lookup[q['full_id']] = q
 
-            # Build block lookup if question_blocks are available
+            # Build block lookup - check both question_blocks and raw_blocks
             block_lookup = {}
             question_blocks = st.session_state.get("question_blocks", {})
-            if question_blocks:
-                for ch_key_b, ch_blocks in question_blocks.items():
+            raw_blocks = st.session_state.get("raw_blocks", {})
+
+            # Prefer raw_blocks as it has question_text_raw/answer_text_raw
+            blocks_to_index = raw_blocks if raw_blocks else question_blocks
+            if blocks_to_index:
+                for ch_key_b, ch_blocks in blocks_to_index.items():
                     for block in ch_blocks:
                         block_id = block.get("block_id", block.get("block_label", ""))
                         if block_id:
@@ -2106,16 +2042,43 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                         if card.get('confidence'):
                             extra_parts.append(f"<b>Confidence:</b> {card['confidence']}")
 
-                        # Include block context in extra
-                        if source_block:
-                            context_text = source_block.get('context_text', '')
-                            shared_answer = source_block.get('shared_answer_text', '')
-                            if context_text:
-                                extra_parts.append(f"<hr><b>Context:</b><br>{context_text[:500]}{'...' if len(context_text) > 500 else ''}")
-                            if shared_answer:
-                                extra_parts.append(f"<hr><b>Discussion:</b><br>{shared_answer}")
+                        # Build source reference with raw block text
+                        source_ref_parts = [f'<span class="cloze-source-label">Generated from Block {source_block_id}</span>']
 
-                        source_ref = f"Generated from Block {source_block_id}"
+                        if source_block:
+                            # Get raw text from the block (new format)
+                            question_text_raw = source_block.get('question_text_raw', '')
+                            answer_text_raw = source_block.get('answer_text_raw', '')
+
+                            if question_text_raw or answer_text_raw:
+                                source_ref_parts.append('<div class="cloze-source-text">')
+                                if question_text_raw:
+                                    # Escape HTML entities in raw text
+                                    escaped_q = question_text_raw.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                                    source_ref_parts.append(f'<b>QUESTION:</b>\n{escaped_q}')
+                                if answer_text_raw:
+                                    escaped_a = answer_text_raw.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                                    if question_text_raw:
+                                        source_ref_parts.append('\n\n')
+                                    source_ref_parts.append(f'<b>ANSWER:</b>\n{escaped_a}')
+                                source_ref_parts.append('</div>')
+                            else:
+                                # Fallback to old format fields
+                                context_text = source_block.get('context_text', '')
+                                shared_answer = source_block.get('shared_answer_text', '')
+                                if context_text or shared_answer:
+                                    source_ref_parts.append('<div class="cloze-source-text">')
+                                    if context_text:
+                                        escaped_ctx = context_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                                        source_ref_parts.append(f'<b>CONTEXT:</b>\n{escaped_ctx}')
+                                    if shared_answer:
+                                        escaped_ans = shared_answer.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                                        if context_text:
+                                            source_ref_parts.append('\n\n')
+                                        source_ref_parts.append(f'<b>DISCUSSION:</b>\n{escaped_ans}')
+                                    source_ref_parts.append('</div>')
+
+                        source_ref = ''.join(source_ref_parts)
                     else:
                         # Legacy question-based card
                         local_id = source_q_id.split('_')[-1] if '_' in source_q_id else source_q_id
@@ -2123,6 +2086,7 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                         # Look up source question to get explanation
                         source_q = question_lookup.get(source_q_id, {})
                         source_explanation = source_q.get('explanation', '')
+                        source_text = source_q.get('text', '')
 
                         if card.get('learning_point'):
                             extra_parts.append(f"<b>Learning point:</b> {card['learning_point']}")
@@ -2130,10 +2094,23 @@ def generate_anki_deck(book_name: str, questions: dict, chapters: list, image_as
                             extra_parts.append(f"<b>Category:</b> {card['category']}")
                         if card.get('confidence'):
                             extra_parts.append(f"<b>Confidence:</b> {card['confidence']}")
-                        if source_explanation:
-                            extra_parts.append(f"<hr><b>Source:</b><br>{source_explanation}")
 
-                        source_ref = f"Generated from Q{local_id}"
+                        # Build source reference with question/explanation text
+                        source_ref_parts = [f'<span class="cloze-source-label">Generated from Q{local_id}</span>']
+
+                        if source_text or source_explanation:
+                            source_ref_parts.append('<div class="cloze-source-text">')
+                            if source_text:
+                                escaped_q = source_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                                source_ref_parts.append(f'<b>QUESTION:</b>\n{escaped_q}')
+                            if source_explanation:
+                                escaped_exp = source_explanation.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                                if source_text:
+                                    source_ref_parts.append('\n\n')
+                                source_ref_parts.append(f'<b>EXPLANATION:</b>\n{escaped_exp}')
+                            source_ref_parts.append('</div>')
+
+                        source_ref = ''.join(source_ref_parts)
 
                     extra = '<br>'.join(extra_parts)
 
@@ -2214,8 +2191,8 @@ def render_generate_step():
         Each explanation is analyzed to extract key learning points that become additional Anki cards.
         """)
 
-    # Check prerequisites - need either questions_merged or questions
-    questions_source = st.session_state.questions_merged or st.session_state.questions
+    # Check prerequisites
+    questions_source = st.session_state.questions
     if not questions_source:
         st.warning("Please format questions first (Step 4)")
         return
@@ -3025,9 +3002,8 @@ def render_export_step():
 
         with st.spinner("Generating Anki deck..."):
             try:
-                # Use merged questions/assignments if available (includes context in text)
-                questions_to_export = st.session_state.questions_merged if st.session_state.questions_merged else st.session_state.questions
-                assignments_to_export = st.session_state.image_assignments_merged if st.session_state.image_assignments_merged else st.session_state.image_assignments
+                questions_to_export = st.session_state.questions
+                assignments_to_export = st.session_state.image_assignments
 
                 # Build export_selections from checkbox keys in session state
                 export_selections = {}

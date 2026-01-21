@@ -67,25 +67,40 @@ def get_model_pricing(model_id: str) -> dict:
     return DEFAULT_PRICING
 
 
-def calculate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
+def calculate_cost(
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0
+) -> float:
     """
-    Calculate the cost of an API call.
+    Calculate the cost of an API call, accounting for cache pricing.
+
+    Pricing multipliers:
+    - Regular input tokens: 1.0x base input price
+    - Cache creation tokens: 1.25x base input price (5-minute TTL)
+    - Cache read tokens: 0.1x base input price (90% discount)
 
     Args:
         model_id: The model ID used
-        input_tokens: Number of input tokens
+        input_tokens: Number of regular (uncached) input tokens
         output_tokens: Number of output tokens
+        cache_creation_input_tokens: Tokens used to create cache entries
+        cache_read_input_tokens: Tokens read from cache
 
     Returns:
         Cost in dollars
     """
     pricing = get_model_pricing(model_id)
 
-    # Convert from per-million to per-token
+    # Convert from per-million to per-token with cache pricing multipliers
     input_cost = (input_tokens / 1_000_000) * pricing["input"]
+    cache_creation_cost = (cache_creation_input_tokens / 1_000_000) * pricing["input"] * 1.25
+    cache_read_cost = (cache_read_input_tokens / 1_000_000) * pricing["input"] * 0.1
     output_cost = (output_tokens / 1_000_000) * pricing["output"]
 
-    return input_cost + output_cost
+    return input_cost + cache_creation_cost + cache_read_cost + output_cost
 
 
 # =============================================================================
@@ -125,12 +140,17 @@ def queue_api_cost(step_name: str, model_id: str, usage: dict):
     Args:
         step_name: Name of the step
         model_id: The model ID used
-        usage: Usage dict with input_tokens, output_tokens
+        usage: Usage dict with input_tokens, output_tokens, and optional cache tokens
     """
     global _pending_costs
     input_tokens = usage.get("input_tokens", 0)
     output_tokens = usage.get("output_tokens", 0)
-    cost = calculate_cost(model_id, input_tokens, output_tokens)
+    cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
+    cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
+    cost = calculate_cost(
+        model_id, input_tokens, output_tokens,
+        cache_creation_input_tokens, cache_read_input_tokens
+    )
 
     with _thread_lock:
         _pending_costs.append({
@@ -138,6 +158,8 @@ def queue_api_cost(step_name: str, model_id: str, usage: dict):
             "model": model_id,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens,
             "cost": cost,
             "timestamp": datetime.now().isoformat()
         })
@@ -149,7 +171,8 @@ def flush_pending_costs():
     Call this from the main thread after parallel operations complete.
 
     Returns:
-        Dict with totals: {"input_tokens": N, "output_tokens": N, "cost": N}
+        Dict with totals: {"input_tokens": N, "output_tokens": N, "cost": N,
+                          "cache_creation_input_tokens": N, "cache_read_input_tokens": N}
     """
     global _pending_costs
 
@@ -158,11 +181,16 @@ def flush_pending_costs():
         _pending_costs = []
 
     if not pending:
-        return {"input_tokens": 0, "output_tokens": 0, "cost": 0.0}
+        return {
+            "input_tokens": 0, "output_tokens": 0, "cost": 0.0,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0
+        }
 
     # Aggregate totals
     total_input = sum(p["input_tokens"] for p in pending)
     total_output = sum(p["output_tokens"] for p in pending)
+    total_cache_creation = sum(p.get("cache_creation_input_tokens", 0) for p in pending)
+    total_cache_read = sum(p.get("cache_read_input_tokens", 0) for p in pending)
     total_cost = sum(p["cost"] for p in pending)
 
     # Add to session state if available
@@ -188,7 +216,10 @@ def flush_pending_costs():
         # Add individual calls
         tracker["calls"].extend(pending)
 
-    return {"input_tokens": total_input, "output_tokens": total_output, "cost": total_cost}
+    return {
+        "input_tokens": total_input, "output_tokens": total_output, "cost": total_cost,
+        "cache_creation_input_tokens": total_cache_creation, "cache_read_input_tokens": total_cache_read
+    }
 
 
 def track_api_call(step_name: str, model_id: str, usage: dict):
@@ -198,7 +229,8 @@ def track_api_call(step_name: str, model_id: str, usage: dict):
     Args:
         step_name: Name of the step (e.g., "identify_chapters", "format_blocks")
         model_id: The model ID used
-        usage: Usage dict from stream_message with input_tokens, output_tokens
+        usage: Usage dict from stream_message with input_tokens, output_tokens,
+               and optional cache_creation_input_tokens, cache_read_input_tokens
 
     Note: If not in Streamlit context (e.g., worker thread), queues for later aggregation.
     """
@@ -211,7 +243,12 @@ def track_api_call(step_name: str, model_id: str, usage: dict):
 
     input_tokens = usage.get("input_tokens", 0)
     output_tokens = usage.get("output_tokens", 0)
-    cost = calculate_cost(model_id, input_tokens, output_tokens)
+    cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
+    cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
+    cost = calculate_cost(
+        model_id, input_tokens, output_tokens,
+        cache_creation_input_tokens, cache_read_input_tokens
+    )
 
     tracker = st.session_state.cost_tracker
 
@@ -241,6 +278,8 @@ def track_api_call(step_name: str, model_id: str, usage: dict):
         "model": model_id,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
         "cost": cost,
         "timestamp": datetime.now().isoformat()
     })

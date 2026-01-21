@@ -113,12 +113,6 @@ def render_sidebar():
     else:
         st.sidebar.info("Formatted: Not done")
 
-    merged_count = sum(len(qs) for qs in st.session_state.questions_merged.values())
-    if merged_count > 0:
-        st.sidebar.success(f"Context: Associated")
-    else:
-        st.sidebar.info("Context: Not associated")
-
     reviewed = len(st.session_state.qc_progress.get("reviewed", {}))
     if reviewed > 0:
         st.sidebar.success(f"QC'd: {reviewed}/{q_count}")

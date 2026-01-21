@@ -61,18 +61,6 @@ def get_questions_file() -> str:
     return f"{get_output_dir()}/questions_by_chapter.json"
 
 
-def get_raw_questions_file() -> str:
-    return f"{get_output_dir()}/raw_questions.json"
-
-
-def get_questions_merged_file() -> str:
-    return f"{get_output_dir()}/questions_merged.json"
-
-
-def get_image_assignments_merged_file() -> str:
-    return f"{get_output_dir()}/image_assignments_merged.json"
-
-
 def get_images_file() -> str:
     return f"{get_output_dir()}/images.json"
 
@@ -170,18 +158,12 @@ def init_session_state():
         st.session_state.chapters = None
     if "chapter_texts" not in st.session_state:
         st.session_state.chapter_texts = {}
-    if "raw_questions" not in st.session_state:
-        st.session_state.raw_questions = {}
     if "questions" not in st.session_state:
         st.session_state.questions = {}
-    if "questions_merged" not in st.session_state:
-        st.session_state.questions_merged = {}
     if "images" not in st.session_state:
         st.session_state.images = []
     if "image_assignments" not in st.session_state:
         st.session_state.image_assignments = {}
-    if "image_assignments_merged" not in st.session_state:
-        st.session_state.image_assignments_merged = {}
     if "qc_progress" not in st.session_state:
         st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
     if "current_step" not in st.session_state:
@@ -213,12 +195,9 @@ def clear_session_data():
     st.session_state.pages = None
     st.session_state.chapters = None
     st.session_state.chapter_texts = {}
-    st.session_state.raw_questions = {}
     st.session_state.questions = {}
-    st.session_state.questions_merged = {}
     st.session_state.images = []
     st.session_state.image_assignments = {}
-    st.session_state.image_assignments_merged = {}
     st.session_state.qc_progress = {"reviewed": {}, "corrections": {}, "metadata": {}}
     st.session_state.qc_selected_idx = 0
     st.session_state.pdf_path = None
@@ -265,12 +244,9 @@ def load_saved_data():
     pages_file = get_pages_file()
     chapters_file = get_chapters_file()
     chapter_text_file = get_chapter_text_file()
-    raw_questions_file = get_raw_questions_file()
     questions_file = get_questions_file()
-    questions_merged_file = get_questions_merged_file()
     images_file = get_images_file()
     assignments_file = get_image_assignments_file()
-    assignments_merged_file = get_image_assignments_merged_file()
 
     if os.path.exists(pages_file):
         with open(pages_file) as f:
@@ -283,24 +259,15 @@ def load_saved_data():
     if os.path.exists(chapter_text_file):
         with open(chapter_text_file) as f:
             st.session_state.chapter_texts = json.load(f)
-    if os.path.exists(raw_questions_file):
-        with open(raw_questions_file) as f:
-            st.session_state.raw_questions = json.load(f)
     if os.path.exists(questions_file):
         with open(questions_file) as f:
             st.session_state.questions = json.load(f)
-    if os.path.exists(questions_merged_file):
-        with open(questions_merged_file) as f:
-            st.session_state.questions_merged = json.load(f)
     if os.path.exists(images_file):
         with open(images_file) as f:
             st.session_state.images = json.load(f)
     if os.path.exists(assignments_file):
         with open(assignments_file) as f:
             st.session_state.image_assignments = json.load(f)
-    if os.path.exists(assignments_merged_file):
-        with open(assignments_merged_file) as f:
-            st.session_state.image_assignments_merged = json.load(f)
 
     generated_file = get_generated_questions_file()
     if os.path.exists(generated_file):
@@ -360,13 +327,6 @@ def save_questions():
         json.dump(st.session_state.questions, f, indent=2)
 
 
-def save_raw_questions():
-    """Save raw extracted Q&A pairs (line ranges + text) to file."""
-    os.makedirs(get_output_dir(), exist_ok=True)
-    with open(get_raw_questions_file(), "w") as f:
-        json.dump(st.session_state.raw_questions, f, indent=2)
-
-
 def save_images():
     """Save image metadata to file."""
     os.makedirs(get_output_dir(), exist_ok=True)
@@ -387,20 +347,6 @@ def save_image_assignments():
     os.makedirs(get_output_dir(), exist_ok=True)
     with open(get_image_assignments_file(), "w") as f:
         json.dump(st.session_state.image_assignments, f, indent=2)
-
-
-def save_questions_merged():
-    """Save merged questions (with context associated) to file."""
-    os.makedirs(get_output_dir(), exist_ok=True)
-    with open(get_questions_merged_file(), "w") as f:
-        json.dump(st.session_state.questions_merged, f, indent=2)
-
-
-def save_image_assignments_merged():
-    """Save merged image-to-question assignments to file."""
-    os.makedirs(get_output_dir(), exist_ok=True)
-    with open(get_image_assignments_merged_file(), "w") as f:
-        json.dump(st.session_state.image_assignments_merged, f, indent=2)
 
 
 def save_generated_questions():

@@ -113,13 +113,6 @@ All state is persisted to JSON files in `output/<textbook_name>/`:
 | `generated_questions.json` | Generated cloze deletion cards |
 | `extraction.log` | Debug log for LLM extraction operations |
 
-**Legacy files** (supported for backwards compatibility):
-| File | Contents |
-|------|----------|
-| `raw_questions.json` | Legacy two-pass extraction format |
-| `questions_merged.json` | Legacy context association output |
-| `image_assignments_merged.json` | Legacy image assignments after context association |
-
 ## Design Philosophy
 
 ### LLM-First Content Processing

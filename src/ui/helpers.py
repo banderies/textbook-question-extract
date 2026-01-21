@@ -168,9 +168,9 @@ def clear_step_data(step_id: str, cascade: bool = True):
                     os.remove(filepath)
 
         elif step == "questions":
-            # Clear raw questions
-            st.session_state.raw_questions = {}
-            filepath = os.path.join(output_dir, "raw_questions.json")
+            # Clear raw blocks
+            st.session_state.raw_blocks = {}
+            filepath = os.path.join(output_dir, "raw_blocks.json")
             if os.path.exists(filepath):
                 os.remove(filepath)
 
@@ -271,21 +271,12 @@ def question_sort_key(q_id: str) -> tuple:
 def get_images_for_question(q_id: str) -> list[dict]:
     """
     Get question images (from image_files array).
-
-    Prefers questions over questions_merged to use the freshest data
-    (in case formatting was re-run).
     """
-    # Search questions first (fresher data), then questions_merged as fallback
-    questions_to_check = []
     for _, qs in st.session_state.questions.items():
-        questions_to_check.extend(qs)
-    for _, qs in st.session_state.questions_merged.items():
-        questions_to_check.extend(qs)
-
-    for q in questions_to_check:
-        if q["full_id"] == q_id:
-            q_image_files = set(q.get("image_files", []))
-            return [img for img in st.session_state.images if img["filename"] in q_image_files]
+        for q in qs:
+            if q["full_id"] == q_id:
+                q_image_files = set(q.get("image_files", []))
+                return [img for img in st.session_state.images if img["filename"] in q_image_files]
 
     return []
 
@@ -296,16 +287,11 @@ def get_answer_images_for_question(q_id: str) -> list[dict]:
 
     These images should only appear in the explanation section, not with the question.
     """
-    questions_to_check = []
     for _, qs in st.session_state.questions.items():
-        questions_to_check.extend(qs)
-    for _, qs in st.session_state.questions_merged.items():
-        questions_to_check.extend(qs)
-
-    for q in questions_to_check:
-        if q["full_id"] == q_id:
-            answer_image_files = set(q.get("answer_image_files", []))
-            return [img for img in st.session_state.images if img["filename"] in answer_image_files]
+        for q in qs:
+            if q["full_id"] == q_id:
+                answer_image_files = set(q.get("answer_image_files", []))
+                return [img for img in st.session_state.images if img["filename"] in answer_image_files]
 
     return []
 
