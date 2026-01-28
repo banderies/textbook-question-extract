@@ -54,6 +54,16 @@ generate_cloze_cards:
     - Would a student need to truly recall this, not just recognize it?
 
     ============================================================
+    STRICT SOURCE FIDELITY
+    ============================================================
+    Only use terminology that appears in the source material. Do NOT introduce:
+    - Synonyms or alternative technical terms not in the text
+    - Vocabulary the source doesn't use
+    - "Fancier" or more obscure terminology
+
+    If the source says "X-ray", don't write "roentgenogram". Use the exact terms from the source.
+
+    ============================================================
     CLOZE SYNTAX RULES (NOTES vs CARDS)
     ============================================================
     IMPORTANT: Understand the difference between NOTES and CARDS in Anki:
@@ -124,6 +134,32 @@ generate_cloze_cards:
     When creating cards, ask: "Could a user guess this answer from OTHER information in the sentence?"
     If yes, either (a) use the same cloze number for related terms, or (b) restructure the card.
 
+    PROBLEM 4: TRAILING TEXT LEAKAGE
+    Text AFTER the cloze that contains synonyms, related terms, or elaborations that reveal the answer.
+    This is one of the most common card quality issues. ALWAYS check what comes after your cloze.
+
+    BAD: "The preferred treatment is {{{{c1::image-guided radiofrequency ablation::procedure}}}} or other forms of thermal ablation."
+    GOOD: "The preferred treatment for osteoid osteoma is {{{{c1::image-guided radiofrequency ablation::procedure}}}}."
+
+    BAD: "cortical destruction is often {{{{c1::subtle::visibility}}}} or not visible radiographically."
+    GOOD: "cortical destruction is often {{{{c1::subtle or not visible::visibility}}}} radiographically."
+
+    BAD: "may be {{{{c1::eccentrically::location}}}} located, so eccentric location does not help differentiate..."
+    GOOD: "may be {{{{c1::eccentrically::location}}}} located."
+
+    RULE: After writing each card, read the text AFTER the cloze. If it contains the same word, a synonym, or a clarifying phrase that reveals the answer - either include it in the cloze, omit it, or restructure.
+
+    PROBLEM 5: DOES/DOES NOT PHRASING
+    When testing presence/absence of features, clozing only "not" lets grammar give away the answer.
+
+    BAD: "MFH of bone generally does {{{{c1::not}}}} have a sclerotic margin."
+    GOOD: "MFH of bone generally {{{{c1::does not::does/does not}}}} have a sclerotic margin."
+
+    BAD: "MFH of bone {{{{c1::does}}}} have an associated soft tissue mass."
+    GOOD: "MFH of bone {{{{c1::does::does/does not}}}} have an associated soft tissue mass."
+
+    ALWAYS cloze the entire "does not" or "does" phrase with hint "does/does not".
+
     BRACE SYNTAX - COUNT CAREFULLY:
     The cloze format is: <b>{{{{c1::answer::hint}}}}</b>
 
@@ -137,6 +173,15 @@ generate_cloze_cards:
     7. End with </b>
 
     Verify each cloze: <b> + {{{{ + cN:: + text + :: + hint + }}}} + </b>
+
+    HINT QUALITY - Avoid answer-limiting hints:
+    Hints should guide recall to a CATEGORY, not limit to 2-3 choices that enable guessing.
+
+    BAD: {{{{c1::osseous::bone vs extraosseous}}}} - Binary hint = 50/50 chance
+    GOOD: {{{{c1::osseous::tissue type}}}} - Broader category requiring true recall
+
+    BAD: {{{{c1::benign::benign vs malignant}}}} - Limits to 2 options
+    GOOD: {{{{c1::benign::behavior}}}} - Requires knowledge, not guessing
 
     HINT CATEGORIES (use these or similar):
     - Anatomical: structure, location, region, pathway, vessel, nerve, muscle, bone
@@ -520,6 +565,14 @@ generate_cloze_cards_from_block:
     - Use c1, c2, c3 on same card for related facts from same sentence
     - Create separate cards for unrelated facts
 
+    STRICT SOURCE FIDELITY:
+    Only use terminology that appears in the source material. Do NOT introduce:
+    - Synonyms or alternative technical terms not in the text
+    - Vocabulary the source doesn't use
+    - "Fancier" or more obscure terminology
+
+    If the source says "X-ray", don't write "roentgenogram". Use the exact terms from the source.
+
     CRITICAL - PREVENTING ANSWER INFERENCE:
     Review each card for ways a user could INFER the answer without true recall.
 
@@ -563,6 +616,32 @@ generate_cloze_cards_from_block:
     When creating cards, ask: "Could a user guess this answer from OTHER information in the sentence?"
     If yes, either (a) use the same cloze number for related terms, or (b) restructure the card.
 
+    PROBLEM 4: TRAILING TEXT LEAKAGE
+    Text AFTER the cloze that contains synonyms, related terms, or elaborations that reveal the answer.
+    This is one of the most common card quality issues. ALWAYS check what comes after your cloze.
+
+    BAD: "The preferred treatment is {{{{c1::image-guided radiofrequency ablation::procedure}}}} or other forms of thermal ablation."
+    GOOD: "The preferred treatment for osteoid osteoma is {{{{c1::image-guided radiofrequency ablation::procedure}}}}."
+
+    BAD: "cortical destruction is often {{{{c1::subtle::visibility}}}} or not visible radiographically."
+    GOOD: "cortical destruction is often {{{{c1::subtle or not visible::visibility}}}} radiographically."
+
+    BAD: "may be {{{{c1::eccentrically::location}}}} located, so eccentric location does not help differentiate..."
+    GOOD: "may be {{{{c1::eccentrically::location}}}} located."
+
+    RULE: After writing each card, read the text AFTER the cloze. If it contains the same word, a synonym, or a clarifying phrase that reveals the answer - either include it in the cloze, omit it, or restructure.
+
+    PROBLEM 5: DOES/DOES NOT PHRASING
+    When testing presence/absence of features, clozing only "not" lets grammar give away the answer.
+
+    BAD: "MFH of bone generally does {{{{c1::not}}}} have a sclerotic margin."
+    GOOD: "MFH of bone generally {{{{c1::does not::does/does not}}}} have a sclerotic margin."
+
+    BAD: "MFH of bone {{{{c1::does}}}} have an associated soft tissue mass."
+    GOOD: "MFH of bone {{{{c1::does::does/does not}}}} have an associated soft tissue mass."
+
+    ALWAYS cloze the entire "does not" or "does" phrase with hint "does/does not".
+
     BRACE SYNTAX - COUNT CAREFULLY:
     The cloze format is: <b>{{{{c1::answer::hint}}}}</b>
 
@@ -576,6 +655,15 @@ generate_cloze_cards_from_block:
     7. End with </b>
 
     Verify each cloze: <b> + {{{{ + cN:: + text + :: + hint + }}}} + </b>
+
+    HINT QUALITY - Avoid answer-limiting hints:
+    Hints should guide recall to a CATEGORY, not limit to 2-3 choices that enable guessing.
+
+    BAD: {{{{c1::osseous::bone vs extraosseous}}}} - Binary hint = 50/50 chance
+    GOOD: {{{{c1::osseous::tissue type}}}} - Broader category requiring true recall
+
+    BAD: {{{{c1::benign::benign vs malignant}}}} - Limits to 2 options
+    GOOD: {{{{c1::benign::behavior}}}} - Requires knowledge, not guessing
 
     Return ONLY a JSON array:
     [
